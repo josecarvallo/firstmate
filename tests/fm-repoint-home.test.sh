@@ -112,11 +112,26 @@ test_no_fork_remote_requires_url() {
   pass "to-fork needs a fork url when there is no fork remote"
 }
 
+test_fork_url_ignored_when_fork_remote_present() {
+  local w out fork_url bogus
+  w=$(new_home forkurl)
+  fork_url=$(url "$w/home" fork)
+  bogus="$w/bogus.git"
+  out=$(run to-fork "$w/home" --fork-url "$bogus" --apply)
+  # The existing fork remote is authoritative; a redundant --fork-url is ignored.
+  assert_contains "$out" "--fork-url ignored" "an ignored --fork-url is warned about"
+  assert_contains "$out" "target: origin=$fork_url" "the target report matches the URL actually applied"
+  [ "$(url "$w/home" origin)" = "$fork_url" ] || fail "origin is not the existing fork url ($(url "$w/home" origin) != $fork_url)"
+  [ "$(url "$w/home" origin)" != "$bogus" ] || fail "origin was set to the ignored --fork-url"
+  pass "to-fork promotes the existing fork remote and ignores --fork-url, report matches applied"
+}
+
 test_status_reports_layout
 test_dry_run_mutates_nothing
 test_to_fork_and_roundtrip
 test_idempotent_to_fork
 test_unexpected_state_fails_closed
 test_no_fork_remote_requires_url
+test_fork_url_ignored_when_fork_remote_present
 
 echo "# all fm-repoint-home tests passed"

@@ -102,9 +102,11 @@ cmd_to_fork() {
   fi
   has_remote "$home" origin || die "$home has no origin remote to re-point"
   has_remote "$home" upstream && die "$home already has an upstream remote; unexpected state, refusing to re-point"
-  if [ -z "$fork_url" ]; then
-    has_remote "$home" fork || die "$home has no fork remote; pass --fork-url <url>"
+  if has_remote "$home" fork; then
+    [ -n "$fork_url" ] && echo "fm-repoint-home: warning: --fork-url ignored; promoting the existing fork remote's URL to origin" >&2
     fork_url=$(remote_url "$home" fork)
+  else
+    [ -n "$fork_url" ] || die "$home has no fork remote; pass --fork-url <url>"
   fi
   echo "re-point to fork-as-source: $home"
   echo "  target: origin=$fork_url  upstream=$(remote_url "$home" origin)"
