@@ -303,7 +303,7 @@ report_to_parent() { # <task> <state> <outcome-key> <fingerprint> <pr>
   destination=$(fm_parent_channel_path "$FM_HOME" "$STATE") || return 1
   line="$state [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
   [ -z "$pr" ] || line="$line pr=$pr"
-  fm_parent_channel_append_once "$destination" "$line"
+  fm_parent_channel_append receipt "$destination" "$line"
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>

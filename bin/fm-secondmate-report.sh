@@ -36,8 +36,7 @@
 # --escalate refuses rather than guessing: a home with no parent binding, an
 # unreadable binding, and a key in a reserved namespace whose owning library is
 # the only thing allowed to open or close it all fail loudly. An escalation is
-# appended idempotently, so retries converge on the channel's current decision
-# state.
+# routed through the channel owner's required write categories.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,6 +93,8 @@ if [ "${1:-}" = "--escalate" ]; then
   [ -n "$NOTE" ] || { echo "error: --escalate requires a note" >&2; exit 1; }
   FM_HOME=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}
   STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
   # A reserved key namespace has exactly one owning library; a self-raised
   # escalation must never claim one, or it could block that owner's close.
   if [ -n "$KEY" ] && fm_classify_decision_key_is_reserved "$KEY"; then
@@ -121,15 +122,17 @@ if [ "${1:-}" = "--escalate" ]; then
   fi
   fm_cap_prefixed_line_var "$LINE_PREFIX" "$NOTE" \
     || { echo "error: --key '$KEY' is too long to preserve in the parent escalation channel" >&2; exit 1; }
-  if [ "$VERB" = "$ESC_RESOLVE_VERB" ] && [ -n "$KEY" ]; then
-    # shellcheck source=bin/fm-wake-lib.sh
-    . "$SCRIPT_DIR/fm-wake-lib.sh"
-    fm_parent_channel_append_close_if_open "$CHANNEL" "$KEY" "$FM_LINE_CAP_LINE" \
-      || { echo "error: could not close the escalation in $CHANNEL" >&2; exit 1; }
-  else
-    fm_parent_channel_append_once "$CHANNEL" "$FM_LINE_CAP_LINE" \
-      || { echo "error: could not append the escalation to $CHANNEL" >&2; exit 1; }
-  fi
+  case "$VERB" in
+    needs-decision|blocked)
+      fm_parent_channel_append transition "$CHANNEL" "$FM_LINE_CAP_LINE" open "${KEY:-default}"
+      ;;
+    "$ESC_RESOLVE_VERB")
+      fm_parent_channel_append transition "$CHANNEL" "$FM_LINE_CAP_LINE" close "${KEY:-default}"
+      ;;
+    *)
+      fm_parent_channel_append event "$CHANNEL" "$FM_LINE_CAP_LINE"
+      ;;
+  esac || { echo "error: could not append the escalation to $CHANNEL" >&2; exit 1; }
   printf 'escalated to %s\n' "$CHANNEL"
   exit 0
 fi

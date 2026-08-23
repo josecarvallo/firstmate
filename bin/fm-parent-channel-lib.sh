@@ -24,6 +24,13 @@
 # and the second must fail visibly rather than let a close land in the wrong
 # channel in silence.
 #
+# Every write chooses exactly one category through fm_parent_channel_append:
+#   transition -> a decision open or close is appended only when the folded
+#                 live state needs that transition, under the channel lock
+#   receipt    -> an immutable unique receipt is deduplicated by exact content
+#   event      -> every occurrence is appended, including identical repeats
+# Missing and unknown categories are refused.
+#
 # This file is sourced and has no side effects on source.
 
 _FM_PARENT_CHANNEL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PARENT_CHANNEL_LIB_DIR="."
@@ -56,11 +63,21 @@ fm_parent_channel_self_id() {  # <home>
   printf '%s\n' "$id"
 }
 
+fm_parent_channel_path_usable() {  # <path>
+  local path=$1 dir
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ]
+    return
+  fi
+  dir=$(dirname "$path")
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -w "$dir" ]
+}
+
 # Resolve this home's parent escalation channel.
 # 0 + prints the absolute destination path; 1 = this home has no parent;
 # 2 = this home has a parent but its channel cannot be resolved (fail visibly).
 fm_parent_channel_path() {  # <home> <state-dir>
-  local home=$1 state=$2 self rc=0 path
+  local home=$1 state=$2 self rc=0 path dir
   self=$(fm_parent_channel_self_id "$home") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   # An identified secondmate home with no readable parent binding is the
@@ -70,8 +87,7 @@ fm_parent_channel_path() {  # <home> <state-dir>
     local)
       [ -n "$FM_SECONDMATE_PARENT_HOME" ] || return 2
       # The home itself must exist - a binding naming a moved or deleted parent
-      # is unresolvable, not a silent no-op. Its state/ dir need not exist yet;
-      # the append creates it, exactly as the pre-existing cross-home writer did.
+      # is unresolvable, not a silent no-op.
       [ -d "$FM_SECONDMATE_PARENT_HOME" ] || return 2
       path="$FM_SECONDMATE_PARENT_HOME/state/$self.status"
       ;;
@@ -81,52 +97,61 @@ fm_parent_channel_path() {  # <home> <state-dir>
       ;;
     *) return 2 ;;
   esac
-  # A symlinked channel is unresolvable, not empty. status_open_decisions
-  # refuses to read one and would fold it to "no open keys", so a caller that
-  # only checked the fold would close its local copy and strand the upstream one
-  # in silence - exactly the asymmetry this library exists to prevent.
-  [ ! -L "$path" ] || return 2
+  dir=$(dirname "$path")
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    mkdir "$dir" 2>/dev/null || return 2
+  fi
+  fm_parent_channel_path_usable "$path" || return 2
   printf '%s\n' "$path"
 }
 
-# Append one identical immutable line to a parent channel at most once.
-# A retried escalation, an inactive receipt, and the mate's own belt-and-braces
-# repeat converge on one line rather than stack duplicates in the parent's log.
-# A symlinked destination is refused rather than followed out of the state
-# directory.
-fm_parent_channel_append_once() {  # <path> <line>
-  local path=$1 line=$2 dir
-  [ -n "$path" ] || return 1
-  [ ! -L "$path" ] || return 1
-  dir=$(dirname "$path")
-  mkdir -p "$dir" 2>/dev/null || return 1
-  [ -d "$dir" ] || return 1
-  if grep -Fqx -- "$line" "$path" 2>/dev/null; then
-    return 0
-  fi
-  printf '%s\n' "$line" >> "$path"
-}
-
-fm_parent_channel_append_close_if_open() {  # <path> <key> <line> [<self-announced-state>]
-  local path=$1 key=$2 line=$3 self_state=${4:-} dir lock open append_rc=0 rc=0
-  [ -n "$path" ] && [ -n "$key" ] || return 1
-  [ ! -L "$path" ] || return 1
-  dir=$(dirname "$path")
-  mkdir -p "$dir" 2>/dev/null || return 1
-  [ -d "$dir" ] || return 1
-  lock="$path.decision-transition.lock"
+fm_parent_channel_append() {
+  [ "$#" -ge 3 ] || return 1
+  local category=$1 path=$2 line=$3 action='' key='' self_state=''
+  local lock open='' is_open=0 append_rc=0 rc=0
+  shift 3
+  case "$category" in
+    receipt|event)
+      [ "$#" -eq 0 ] || return 1
+      ;;
+    transition)
+      [ "$#" -ge 2 ] && [ "$#" -le 3 ] || return 1
+      action=$1
+      key=$2
+      self_state=${3:-}
+      case "$action" in open|close) ;; *) return 1 ;; esac
+      [ -n "$key" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  fm_parent_channel_path_usable "$path" || return 1
+  lock="$path.parent-channel.lock"
   fm_lock_acquire_wait "$lock" || return 1
-  if [ -L "$path" ]; then
+  if ! fm_parent_channel_path_usable "$path"; then
     rc=1
   else
-    open=$(status_open_decisions "$path")
-    case "$open" in
-      "$key"$'\t'*|*$'\n'"$key"$'\t'*)
-        if [ -n "$self_state" ]; then
-          fm_wake_status_append_self_announced "$self_state" "$path" "$line" || append_rc=$?
-          [ "$append_rc" -ne 2 ] || rc=1
-        else
-          printf '%s\n' "$line" >> "$path" || rc=1
+    case "$category" in
+      receipt)
+        grep -Fqx -- "$line" "$path" 2>/dev/null \
+          || printf '%s\n' "$line" >> "$path" \
+          || rc=1
+        ;;
+      event)
+        printf '%s\n' "$line" >> "$path" || rc=1
+        ;;
+      transition)
+        open=$(status_open_decisions "$path")
+        case "$open" in
+          "$key"$'\t'*|*$'\n'"$key"$'\t'*) is_open=1 ;;
+        esac
+        if { [ "$action" = open ] && [ "$is_open" -eq 0 ]; } \
+          || { [ "$action" = close ] && [ "$is_open" -eq 1 ]; }; then
+          if [ -n "$self_state" ]; then
+            fm_wake_status_append_self_announced "$self_state" "$path" "$line" || append_rc=$?
+            [ "$append_rc" -ne 2 ] || rc=1
+          else
+            printf '%s\n' "$line" >> "$path" || rc=1
+          fi
         fi
         ;;
     esac

@@ -500,14 +500,11 @@ if [ -n "$RESOLVE_KEYS" ]; then
         fi
         ;;
     esac
-    [ "$resolve_key_owned" -eq 0 ] || continue
-    # Open in neither status copy. A decision already transferred to its durable
-    # captain-held task is exactly this case, and it is answerable - just
-    # through the other ledger - so check there before refusing.
     if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
-      continue
+      resolve_key_owned=1
     fi
+    [ "$resolve_key_owned" -eq 1 ] && continue
     echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE${RESOLVE_PARENT_CHANNEL:+ or $RESOLVE_PARENT_CHANNEL}, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
@@ -526,7 +523,7 @@ fm_send_close_resolved_keys() {  # <answer-text>
   for k in $RESOLVE_STATUS_KEYS; do
     prefix="resolved [key=$k]: answered: "
     fm_cap_prefixed_line_var "$prefix" "$note" || return 1
-    if ! fm_parent_channel_append_close_if_open "$RESOLVE_STATUS_FILE" "$k" "$FM_LINE_CAP_LINE" "$STATE"; then
+    if ! fm_parent_channel_append transition "$RESOLVE_STATUS_FILE" "$FM_LINE_CAP_LINE" close "$k" "$STATE"; then
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
       return 1
     fi
@@ -540,7 +537,7 @@ fm_send_close_resolved_keys() {  # <answer-text>
   for k in $RESOLVE_PARENT_KEYS; do
     prefix="resolved [key=$k]: answered: "
     fm_cap_prefixed_line_var "$prefix" "$note" || return 1
-    if ! fm_parent_channel_append_close_if_open "$RESOLVE_PARENT_CHANNEL" "$k" "$FM_LINE_CAP_LINE"; then
+    if ! fm_parent_channel_append transition "$RESOLVE_PARENT_CHANNEL" "$FM_LINE_CAP_LINE" close "$k"; then
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in the parent escalation channel $RESOLVE_PARENT_CHANNEL, where this home opened it. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_PARENT_CHANNEL - do not resend the answer." >&2
       return 1
     fi

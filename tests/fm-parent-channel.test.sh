@@ -83,6 +83,49 @@ SH
   chmod +x "$fb/tmux"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/sleep"
   chmod +x "$fb/sleep"
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+root=${FM_FAKE_TASKS_STATE:-}
+case "${1:-}:${2:-}" in
+  --version:) printf 'tasks-axi 0.2.4\n' ;;
+  update:--help) printf '%s\n' 'usage: tasks-axi update <id> --archive-body' ;;
+  mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
+  hold:--help) printf '%s\n' 'usage: tasks-axi hold <id> --kind captain' ;;
+  show:*)
+    [ -n "$root" ] && [ -f "$root/$2.state" ] || exit 1
+    state=$(cat "$root/$2.state")
+    hold_kind=$(cat "$root/$2.hold" 2>/dev/null || true)
+    body=$(cat "$root/$2.body" 2>/dev/null || true)
+    body_json=$(printf '%s' "$body" | perl -MJSON::PP -e 'local $/; print encode_json(<STDIN>)')
+    printf '  state: %s\n  hold_kind: %s\n  body: %s\n' "$state" "${hold_kind:--}" "$body_json"
+    ;;
+  update:*)
+    [ -n "$root" ] || exit 1
+    id=$2
+    shift 2
+    body_file=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --body-file) shift; body_file=${1:-} ;;
+      esac
+      shift
+    done
+    [ -n "$body_file" ] || exit 1
+    cp "$body_file" "$root/$id.body"
+    ;;
+  done:*)
+    [ -n "$root" ] || exit 1
+    printf 'done\n' > "$root/$2.state"
+    ;;
+  unhold:*)
+    [ -n "$root" ] || exit 1
+    printf '%s\n' '-' > "$root/$2.hold"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fb/tasks-axi"
   printf '%s\n' "$fb"
 }
 
@@ -111,6 +154,26 @@ run_send() {  # <fakebin> <home> <log> <fm-send args...>
   env PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" "$@" 2>/dev/null
+}
+
+resolve_channel() {  # <home> <state>
+  FM_HOME="$1" FM_STATE_OVERRIDE="$2" bash -c '
+    . "$1"
+    fm_parent_channel_path "$2" "$3" >/dev/null
+  ' _ "$ROOT/bin/fm-parent-channel-lib.sh" "$1" "$2"
+}
+
+dispatch_channel() {  # <home> <state> <dispatch args...>
+  local home=$1 state=$2
+  shift 2
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    . "$2"
+    . "$3"
+    shift 3
+    fm_parent_channel_append "$@"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-classify-lib.sh" \
+    "$ROOT/bin/fm-parent-channel-lib.sh" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -153,41 +216,122 @@ test_full_cycle_close_reaches_parent_channel() {
   pass "parent channel: a close aimed at the worker also closes the key the mate opened upstream"
 }
 
+test_answer_enumerates_every_live_ledger() {
+  local dir fb log parent mate pair tasks rc out
+  dir="$TMP_ROOT/all-ledgers"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; tasks="$dir/tasks"
+  mkdir -p "$tasks"
+  pair=$(setup_pair all-ledgers ledger-mate)
+  parent=${pair% *}; mate=${pair#* }
+
+  fm_write_meta "$mate/state/w7.meta" "window=sess:fm-w7" "kind=ship"
+  printf 'captain-held [key=all-copies]: tracked by all-copies\n' > "$mate/state/w7.status"
+  printf 'needs-decision [key=all-copies]: choose a or b\n' > "$parent/state/ledger-mate.status"
+  printf 'queued\n' > "$tasks/all-copies.state"
+  printf 'captain\n' > "$tasks/all-copies.hold"
+
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_FAKE_TASKS_STATE="$tasks" \
+    "$SEND" w7 --resolve-key all-copies "choose a" >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "one answer should close every ledger that claims the key"
+  out=$(drain_out "$parent")
+  if printf '%s' "$out" | grep -F '[key=all-copies]' >/dev/null; then
+    fail "the parent-channel copy remained open after the shared answer: $out"
+  fi
+  [ "$(cat "$tasks/all-copies.state")" = done ] \
+    || fail "the local captain-held copy was not closed by the shared answer"
+
+  fm_write_meta "$mate/state/w8.meta" "window=sess:fm-w8" "kind=ship"
+  printf 'working: no decision here\n' > "$mate/state/w8.status"
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_FAKE_TASKS_STATE="$tasks" \
+    "$SEND" w8 --resolve-key nowhere "choose a" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "a key claimed by no ledger was still sent"
+  [ ! -s "$log" ] || fail "the no-ledger refusal still typed text: $(cat "$log")"
+  pass "parent channel: one answer closes every claiming ledger and none means refusal"
+}
+
 # Reopening a key is a new decision lifetime even when its answer repeats, while
 # repeating a close against an already-closed lifetime remains a no-op.
 test_reopened_key_closes_and_close_replay_is_idempotent() {
-  local dir fb log parent mate pair rc n out
+  local dir parent mate pair rc n out channel receipt event
   dir="$TMP_ROOT/idem"; mkdir -p "$dir"
-  fb=$(make_stubs "$dir"); log="$dir/send.log"
   pair=$(setup_pair idem beta)
   parent=${pair% *}; mate=${pair#* }
+  channel="$parent/state/beta.status"
+  receipt='done [key=inactive-outcome-beta-w1-done]: inactive terminal child=w1 fingerprint=abc123'
+  event='working: identical wake-worthy event'
 
-  fm_write_meta "$mate/state/w1.meta" "window=sess:fm-w1" "kind=ship"
-  printf 'needs-decision [key=dup-guard]: a or b\n' > "$mate/state/w1.status"
-  printf 'needs-decision [key=dup-guard]: a or b\n' > "$parent/state/beta.status"
+  if dispatch_channel "$mate" "$mate/state"; then
+    fail "a parent-channel write without a category was accepted"
+  fi
+  if dispatch_channel "$mate" "$mate/state" unknown "$channel" "ignored"; then
+    fail "a parent-channel write with an unknown category was accepted"
+  fi
+  [ ! -e "$channel" ] || fail "a refused unclassified write still created the channel"
 
-  run_send "$fb" "$mate" "$log" w1 --resolve-key dup-guard "pick a"; rc=$?
-  expect_code 0 "$rc" "the first answer should succeed"
-  # Re-open both live copies and answer again with the same text.
-  printf 'needs-decision [key=dup-guard]: a or b\n' >> "$mate/state/w1.status"
-  printf 'needs-decision [key=dup-guard]: a or b\n' >> "$parent/state/beta.status"
-  run_send "$fb" "$mate" "$log" w1 --resolve-key dup-guard "pick a"; rc=$?
+  dispatch_channel "$mate" "$mate/state" receipt "$channel" "$receipt" \
+    || fail "the immutable receipt could not be appended"
+  dispatch_channel "$mate" "$mate/state" receipt "$channel" "$receipt" \
+    || fail "the immutable receipt replay could not converge"
+  n=$(grep -Fc "$receipt" "$channel" || true)
+  [ "$n" = 1 ] || fail "the immutable receipt appeared $n times"
+
+  dispatch_channel "$mate" "$mate/state" event "$channel" "$event" \
+    || fail "the first repeated event could not be appended"
+  dispatch_channel "$mate" "$mate/state" event "$channel" "$event" \
+    || fail "the second repeated event could not be appended"
+  n=$(grep -Fc "$event" "$channel" || true)
+  [ "$n" = 2 ] || fail "two real event occurrences produced $n channel lines"
+
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate needs-decision --key dup-guard "a or b" >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "the first decision open should succeed"
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate resolved --key dup-guard "pick a" >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "the first decision close should succeed"
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate needs-decision --key dup-guard "a or b" >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "the byte-identical decision open should reopen a settled key"
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate resolved --key dup-guard "pick a" >/dev/null 2>&1; rc=$?
   expect_code 0 "$rc" "the reopened decision should accept the repeated answer"
   out=$(drain_out "$parent")
   if printf '%s' "$out" | grep -F '[key=dup-guard]' >/dev/null; then
     fail "the reopened decision stayed open after the repeated answer: $out"
   fi
-  n=$(grep -c 'resolved \[key=dup-guard\]' "$parent/state/beta.status" || true)
+  n=$(grep -c 'resolved \[key=dup-guard\]' "$channel" || true)
   [ "$n" = 2 ] \
-    || fail "two decision lifetimes should have two closes, found $n: $(cat "$parent/state/beta.status")"
+    || fail "two decision lifetimes should have two closes, found $n: $(cat "$channel")"
 
   env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
     "$REPORT" --escalate resolved --key dup-guard "pick a" >/dev/null 2>&1 \
     || fail "replaying an already-settled close should succeed"
-  n=$(grep -c 'resolved \[key=dup-guard\]' "$parent/state/beta.status" || true)
+  n=$(grep -c 'resolved \[key=dup-guard\]' "$channel" || true)
   [ "$n" = 2 ] \
-    || fail "an already-settled close replay appended a third line: $(cat "$parent/state/beta.status")"
-  pass "parent channel: reopened keys close again, while settled close replays remain idempotent"
+    || fail "an already-settled close replay appended a third line: $(cat "$channel")"
+
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate needs-decision "default route" >/dev/null 2>&1 \
+    || fail "the first default-key decision could not open"
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate resolved "same default answer" >/dev/null 2>&1 \
+    || fail "the first default-key decision could not close"
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate needs-decision "default route" >/dev/null 2>&1 \
+    || fail "the identical default-key decision did not reopen"
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate resolved "same default answer" >/dev/null 2>&1 \
+    || fail "the reopened default-key decision could not close"
+  n=$(grep -c '^resolved: same default answer$' "$channel" || true)
+  [ "$n" = 2 ] || fail "two default-key lifetimes produced $n closes"
+  out=$(drain_out "$parent")
+  if printf '%s' "$out" | grep -F '[key=default]' >/dev/null; then
+    fail "the reopened default-key decision stayed open: $out"
+  fi
+  pass "parent channel: write categories fail closed and retain distinct live semantics"
 }
 
 # ---------------------------------------------------------------------------
@@ -292,31 +436,63 @@ test_primary_home_unaffected_and_broken_binding_refuses() {
   pass "parent channel: a primary home is unchanged, and an unreadable binding refuses before sending"
 }
 
-# A symlinked parent channel is the quiet version of the same failure: the fold
-# refuses to read one, so it reports "no open keys" and a caller that trusted
-# only the fold would close its local copy and strand the upstream one.
-test_symlinked_parent_channel_refuses() {
-  local dir fb log parent mate pair rc err
-  dir="$TMP_ROOT/symlink"; mkdir -p "$dir"
+# The resolver accepts only a positively usable channel shape.
+test_channel_requires_positive_usable_shape() {
+  local dir fb log parent mate pair rc err channel
+  dir="$TMP_ROOT/channel-shapes"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/err.log"
-  pair=$(setup_pair symlink eta)
+  pair=$(setup_pair channel-shapes eta)
   parent=${pair% *}; mate=${pair#* }
+  channel="$parent/state/eta.status"
 
-  printf 'needs-decision [key=sneaky]: a or b\n' > "$dir/elsewhere.status"
-  ln -s "$dir/elsewhere.status" "$parent/state/eta.status"
   fm_write_meta "$mate/state/w4.meta" "window=sess:fm-w4" "kind=ship"
   printf 'needs-decision [key=sneaky]: a or b\n' > "$mate/state/w4.status"
 
+  rmdir "$parent/state"
+  resolve_channel "$mate" "$mate/state" \
+    || fail "an absent channel should resolve after creating its real state directory"
+  [ -d "$parent/state" ] && [ ! -L "$parent/state" ] \
+    || fail "the resolver did not create a real parent state directory"
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate working "first event creates the channel" >/dev/null 2>&1 \
+    || fail "the first escalation did not create its absent channel file"
+  [ -f "$channel" ] || fail "the first escalation did not create a regular channel file"
+  rm -f "$channel"
+
+  mkdir "$channel"
+  rc=0; resolve_channel "$mate" "$mate/state" || rc=$?
+  expect_code 2 "$rc" "a directory in place of the channel must be unresolvable"
   : > "$log"
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
     FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" w4 --resolve-key sneaky "a" >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "a symlinked parent channel must refuse, not close only locally"
+  [ "$rc" -ne 0 ] || fail "a non-regular parent channel must refuse before sending"
   [ ! -s "$log" ] || fail "the refused send still typed text: $(cat "$log")"
-  if grep -F 'resolved' "$dir/elsewhere.status" >/dev/null; then
-    fail "the close followed a symlink out of the parent's state dir"
+  if grep -F 'resolved' "$mate/state/w4.status" >/dev/null; then
+    fail "the non-regular parent channel still allowed the local copy to close"
   fi
-  pass "parent channel: a symlinked channel refuses instead of silently stranding the upstream copy"
+  rmdir "$channel"
+
+  mkfifo "$channel"
+  rc=0; resolve_channel "$mate" "$mate/state" || rc=$?
+  expect_code 2 "$rc" "a FIFO in place of the channel must be unresolvable"
+  rm -f "$channel"
+
+  ln -s "$dir/missing-target" "$channel"
+  rc=0; resolve_channel "$mate" "$mate/state" || rc=$?
+  expect_code 2 "$rc" "a dangling channel symlink must be unresolvable"
+  rm -f "$channel"
+
+  printf 'needs-decision [key=sneaky]: a or b\n' > "$channel"
+  chmod 000 "$channel"
+  if [ -r "$channel" ]; then
+    echo "skip: unreadable parent channel shape cannot be represented for this privileged test user"
+  else
+    rc=0; resolve_channel "$mate" "$mate/state" || rc=$?
+    expect_code 2 "$rc" "an unreadable regular channel must be unresolvable"
+  fi
+  chmod 600 "$channel"
+  pass "parent channel: only a positively usable channel shape resolves"
 }
 
 # The identity marker's strictness is a protection, not a convenience: a marker
@@ -456,11 +632,12 @@ test_reserved_namespace_is_not_propagated() {
 }
 
 test_full_cycle_close_reaches_parent_channel
+test_answer_enumerates_every_live_ledger
 test_reopened_key_closes_and_close_replay_is_idempotent
 test_mate_originated_escalation_reaches_parent
 test_remote_route_uses_mirrored_channel
 test_primary_home_unaffected_and_broken_binding_refuses
-test_symlinked_parent_channel_refuses
+test_channel_requires_positive_usable_shape
 test_corrupt_identity_marker_refuses
 test_parent_evidence_without_identity_refuses
 test_long_key_metadata_survives_and_closes
