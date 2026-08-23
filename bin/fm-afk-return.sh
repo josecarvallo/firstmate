@@ -42,9 +42,11 @@ append_evidence() {  # <kind> <text> <file>
   [ -n "$text" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
-    clean=$(printf '%s' "$line" | clean_field)
-    record=$(printf 'evidence\t%s\t%s' "$kind" "$clean")
-    grep -Fqx "$record" "$file" 2>/dev/null || printf '%s\n' "$record" >> "$file"
+    clean=$(printf '%s' "$line" | clean_field) || return 1
+    record=$(printf 'evidence\t%s\t%s' "$kind" "$clean") || return 1
+    if ! grep -Fqx "$record" "$file" 2>/dev/null; then
+      printf '%s\n' "$record" >> "$file" || return 1
+    fi
   done <<EOF
 $text
 EOF
@@ -177,8 +179,12 @@ return_reconcile() {
   # shown before "catch-up clear") rather than left as a gate nothing can
   # close.
   if [ -e "$STATE/.afk-daemon-died-unexpectedly" ]; then
-    append_evidence unsupervised 'the away-mode daemon exited on its own before this return - away mode may have been unsupervised for an unknown period' "$evidence"
-    unexpected_daemon_death=1
+    if append_evidence unsupervised 'the away-mode daemon exited on its own before this return - away mode may have been unsupervised for an unknown period' "$evidence"; then
+      unexpected_daemon_death=1
+    else
+      lifecycle_ok=0
+      printf 'fm-afk-return: failed to stage unexpected-daemon-death evidence; preserving its durable marker for retry\n' >&2
+    fi
   fi
 
   drained=$("$SCRIPT_DIR/fm-wake-drain.sh" 2> "$drain_err") || {

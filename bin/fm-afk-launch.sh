@@ -302,6 +302,11 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
 
 fm_afk_launch_wait_recorded_daemon() {  # <backend> <target>
   local backend=$1 target=$2 attempt=0
+  case "$backend" in
+    herdr|tmux) fm_backend_source "$backend" || true ;;
+    none) ;;
+    *) return 1 ;;
+  esac
   while [ "$attempt" -lt 100 ]; do
     attempt=$((attempt + 1))
     daemon_lock_held_by_live_daemon && return 0
@@ -494,6 +499,7 @@ fm_afk_launch_refresh_active_daemon() {
     fm_afk_launch_log "failed to refresh away-mode flag"
     return 1
   fi
+  daemon_lock_held_by_live_daemon || return 2
   fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
 }
 
@@ -507,7 +513,12 @@ fm_afk_launch_start() {
 
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_refresh_active_daemon
-    return
+    result=$?
+    case "$result" in
+      0) return 0 ;;
+      2) ;;
+      *) return 1 ;;
+    esac
   fi
 
   if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
@@ -518,7 +529,12 @@ fm_afk_launch_start() {
       fm_afk_launch_wait_recorded_daemon "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" || true
       if daemon_lock_held_by_live_daemon; then
         fm_afk_launch_refresh_active_daemon
-        return
+        result=$?
+        case "$result" in
+          0) return 0 ;;
+          2) ;;
+          *) return 1 ;;
+        esac
       fi
     fi
     fm_afk_launch_record_unexpected_death || return 1
@@ -623,9 +639,22 @@ fm_afk_launch_stop() {
   fi
   if [ -n "$pid" ]; then
     if ! kill -TERM "$pid" 2>/dev/null; then
-      fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
-      result=1
+      current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || current_identity=""
+      if [ -n "$current_identity" ] && [ "$current_identity" = "$pid_identity" ]; then
+        fm_afk_launch_log "failed to signal live away-mode daemon pid=$pid; preserving lifecycle state"
+        return 1
+      fi
+      if [ -z "$current_identity" ] && fm_pid_alive "$pid"; then
+        fm_afk_launch_log "failed to signal away-mode daemon pid=$pid and could not revalidate its identity; preserving lifecycle state"
+        return 1
+      fi
+      if [ "$afk_was_active" -eq 1 ]; then
+        fm_afk_launch_record_unexpected_death || return 1
+      fi
+      pid=""
     fi
+  fi
+  if [ -n "$pid" ]; then
     for _ in $(seq 1 40); do
       fm_pid_alive "$pid" || break
       sleep 0.25

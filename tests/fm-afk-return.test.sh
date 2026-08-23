@@ -330,6 +330,39 @@ test_daemon_death_marker_survives_interrupted_reconciliation() {
   pass "interrupted return preserves unexpected-death evidence until publication"
 }
 
+test_daemon_death_marker_survives_evidence_append_failure() {
+  local dir fake_bin real_mktemp out rc gate
+  dir="$TMP_ROOT/daemon-death-append-failure"
+  install_runner "$dir"
+  fake_bin="$dir/fake-bin"
+  real_mktemp=$(command -v mktemp)
+  gate="$dir/home/state/.afk-return-catchup"
+  mkdir -p "$fake_bin"
+  : > "$dir/home/state/.afk-daemon-died-unexpectedly"
+  cat > "$fake_bin/mktemp" <<'SH'
+#!/usr/bin/env bash
+path=$("$REAL_MKTEMP" "$@") || exit 1
+case "$1" in
+  *.afk-return-evidence.*) chmod 400 "$path" || exit 1 ;;
+esac
+printf '%s\n' "$path"
+SH
+  chmod +x "$fake_bin/mktemp"
+
+  set +e
+  out=$(PATH="$fake_bin:$PATH" REAL_MKTEMP="$real_mktemp" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" begin 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "unexpected-death evidence append failure should retain catch-up (rc=$rc): $out"
+  [ -e "$dir/home/state/.afk-daemon-died-unexpectedly" ] \
+    || fail "failed unexpected-death append consumed the only durable marker"
+  [ -s "$gate" ] || fail "failed unexpected-death append did not persist a retry gate"
+  assert_contains "$out" 'failed to stage unexpected-daemon-death evidence' \
+    "failed unexpected-death append was not surfaced"
+  pass "unexpected-death append failure preserves the marker for retry"
+}
+
 test_daemon_death_marker_removal_failure_keeps_retry_gate() {
   local dir out rc gate
   dir="$TMP_ROOT/daemon-death-marker-removal"
@@ -367,4 +400,5 @@ test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
 test_daemon_died_unexpectedly_surfaces_without_blocking
 test_daemon_death_marker_survives_interrupted_reconciliation
+test_daemon_death_marker_survives_evidence_append_failure
 test_daemon_death_marker_removal_failure_keeps_retry_gate

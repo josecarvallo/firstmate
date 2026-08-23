@@ -293,6 +293,34 @@ unit_start_waits_for_recorded_terminal_readiness() {
   rm -rf "$st"
 }
 
+unit_refresh_revalidates_daemon_before_success() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-revalidate.XXXXXX")
+  mkdir -p "$st/state"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported bash -c '
+      . "$1"
+      sleep 30 &
+      daemon_pid=$!
+      mkdir -p "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock"
+      printf "%s" "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid"
+      fm_pid_identity "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid-identity"
+      fm_afk_launch_flag_write() {
+        fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" || return 1
+        command kill -TERM "$daemon_pid" 2>/dev/null || true
+        wait "$daemon_pid" 2>/dev/null || true
+      }
+      ! fm_afk_launch_start
+    ' _ "$LAUNCH" \
+    && [ -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && [ -e "$st/state/.afk" ]; then
+    pass "refresh revalidation: daemon death continues through durable recovery instead of reporting success"
+  else
+    fail "refresh revalidation: daemon death during refresh was silently accepted"
+  fi
+  rm -rf "$st"
+}
+
 unit_stop_confirms_recorded_terminal_absence_before_death() {
   local st fake_bin status
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-readiness.XXXXXX")
@@ -324,6 +352,98 @@ unit_stop_confirms_recorded_terminal_absence_before_death() {
     fail "stop readiness: death was declared without first excluding terminal startup"
   fi
   rm -rf "$st"
+}
+
+unit_wait_sources_herdr_before_terminal_probe() {
+  local st sourced slept
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-wait-source.XXXXXX")
+  sourced="$st/sourced"
+  slept="$st/slept"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" SOURCED="$sourced" SLEPT="$slept" bash -c '
+      . "$1"
+      daemon_lock_held_by_live_daemon() { return 1; }
+      fm_backend_source() {
+        [ "$1" = herdr ] || return 1
+        : > "$SOURCED"
+        fm_backend_herdr_cli() {
+          printf "%s" "{\"error\":{\"code\":\"pane_not_found\"}}"
+          return 1
+        }
+      }
+      sleep() { : > "$SLEPT"; }
+      ! fm_afk_launch_wait_recorded_daemon herdr lab:pane
+    ' _ "$LAUNCH" \
+    && [ -e "$sourced" ] \
+    && [ ! -e "$slept" ]; then
+    pass "Herdr readiness: adapter loads before confirming recorded terminal absence"
+  else
+    fail "Herdr readiness: absent terminal was probed before its adapter loaded"
+  fi
+  rm -rf "$st"
+}
+
+unit_stop_classifies_death_during_failed_signal() {
+  local st live_st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-signal-race.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+      . "$1"
+      sleep 30 &
+      daemon_pid=$!
+      mkdir -p "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock"
+      printf "%s" "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid"
+      fm_pid_identity "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid-identity"
+      kill() {
+        if [ "$1" = -TERM ]; then
+          command kill -TERM "$2" 2>/dev/null || true
+          wait "$2" 2>/dev/null || true
+          return 1
+        fi
+        command kill "$@"
+      }
+      fm_afk_launch_stop
+    ' _ "$LAUNCH" \
+    && [ -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && [ ! -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop signal race: disappeared daemon is classified before lifecycle cleanup"
+  else
+    fail "stop signal race: failed signal lost the concurrent daemon death"
+  fi
+  rm -rf "$st"
+
+  live_st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-signal-live.XXXXXX")
+  mkdir -p "$live_st/state"
+  : > "$live_st/state/.afk"
+  printf 'none\t-\tnative\n' > "$live_st/state/.afk-daemon-terminal"
+  if FM_HOME="$live_st" FM_STATE_OVERRIDE="$live_st/state" bash -c '
+      . "$1"
+      sleep 30 &
+      daemon_pid=$!
+      mkdir -p "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock"
+      printf "%s" "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid"
+      fm_pid_identity "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid-identity"
+      kill() {
+        [ "$1" != -TERM ] || return 1
+        command kill "$@"
+      }
+      ! fm_afk_launch_stop
+      alive=0
+      command kill -0 "$daemon_pid" 2>/dev/null && alive=1
+      command kill -TERM "$daemon_pid" 2>/dev/null || true
+      wait "$daemon_pid" 2>/dev/null || true
+      [ "$alive" -eq 1 ]
+    ' _ "$LAUNCH" \
+    && [ -e "$live_st/state/.afk" ] \
+    && [ -e "$live_st/state/.afk-daemon-terminal" ] \
+    && [ ! -e "$live_st/state/.afk-daemon-died-unexpectedly" ]; then
+    pass "stop signal failure: still-live daemon preserves lifecycle state"
+  else
+    fail "stop signal failure: live daemon was misclassified or lifecycle state was cleared"
+  fi
+  rm -rf "$live_st"
 }
 
 unit_unexpected_death_record_failure_preserves_away_state() {
@@ -1176,7 +1296,10 @@ unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
 unit_restart_records_unexpected_daemon_death
 unit_start_waits_for_recorded_terminal_readiness
+unit_refresh_revalidates_daemon_before_success
 unit_stop_confirms_recorded_terminal_absence_before_death
+unit_wait_sources_herdr_before_terminal_probe
+unit_stop_classifies_death_during_failed_signal
 unit_unexpected_death_record_failure_preserves_away_state
 unit_concurrent_start_serialized
 unit_lock_initialization_grace
