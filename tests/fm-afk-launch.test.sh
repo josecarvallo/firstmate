@@ -260,6 +260,7 @@ unit_start_waits_for_recorded_terminal_readiness() {
   mkdir -p "$st/state" "$fake_bin"
   : > "$st/state/.afk"
   printf 'tmux\tstarting-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  # shellcheck disable=SC2016 # The generated fixture expands these variables when executed.
   printf '#!/usr/bin/env bash\n[ "$1" = has-session ] && { : > "$FM_HOME/terminal-probed"; exit 0; }\nexit 1\n' > "$fake_bin/tmux"
   chmod +x "$fake_bin/tmux"
 
@@ -343,6 +344,7 @@ unit_stop_confirms_recorded_terminal_absence_before_death() {
   mkdir -p "$st/state" "$fake_bin"
   : > "$st/state/.afk"
   printf 'tmux\tabsent-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  # shellcheck disable=SC2016 # The generated fixture expands these variables when executed.
   printf '%s\n' '#!/usr/bin/env bash' \
     'if [ "$1" = has-session ]; then' \
     '  if [ ! -e "$FM_HOME/first-terminal-probe" ]; then' \
@@ -776,6 +778,7 @@ unit_detached_entries_clear_native_sentinel() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-detached-env.XXXXXX")
   mkdir -p "$st/state"
   entry="$st/entry.sh"
+  # shellcheck disable=SC2016 # The generated fixture expands these variables when executed.
   printf '#!/usr/bin/env bash\nprintf "%%s" "${FM_AFK_STATE_PREPARED:-unset}" > "$FM_HOME/prepared-value"\n' > "$entry"
   chmod +x "$entry"
 
@@ -1168,6 +1171,7 @@ unit_refresh_requires_supported_live_terminal() {
     ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" )
     out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start 2>&1)
     status=$?
+    # shellcheck disable=SC2031 # The loop variable remains in this shell; only the launch is substituted.
     if [ "$status" -ne 0 ] \
       && kill -0 "$daemon_pid" 2>/dev/null \
       && [ -e "$st/state/.afk" ] \
@@ -1187,6 +1191,7 @@ unit_refresh_requires_supported_live_terminal() {
   fake_bin="$st/bin"
   mkdir -p "$st/state" "$fake_bin"
   printf 'tmux\tsupported-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  # shellcheck disable=SC2016 # The generated fixture expands these variables when executed.
   printf '#!/usr/bin/env bash\n[ "$1" = has-session ] && exit 0\n[ "$1" != new-session ] || : > "$FM_HOME/unexpected-new-terminal"\nexit 1\n' > "$fake_bin/tmux"
   chmod +x "$fake_bin/tmux"
   sleep 30 &
