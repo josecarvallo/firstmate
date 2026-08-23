@@ -231,6 +231,42 @@ unit_failed_start_rolls_back_state() {
   rm -rf "$st"
 }
 
+unit_restart_records_unexpected_daemon_death() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-restart-after-death.XXXXXX")
+  mkdir -p "$st/state"
+  date '+%s' > "$st/state/.afk"
+  printf 'current-session escalation\n' > "$st/state/.subsuper-escalations"
+
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
+    fail "restart after death: unsupported replacement unexpectedly succeeded"
+  elif [ -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && [ -e "$st/state/.afk" ] \
+    && [ "$(cat "$st/state/.subsuper-escalations")" = 'current-session escalation' ]; then
+    pass "restart after death: unsupervised interval and session evidence survive replacement rollback"
+  else
+    fail "restart after death: replacement attempt lost death or session evidence"
+  fi
+  rm -rf "$st"
+}
+
+unit_unexpected_death_record_failure_preserves_away_state() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-record-failure.XXXXXX")
+  mkdir -p "$st/state/.afk-daemon-died-unexpectedly"
+  date '+%s' > "$st/state/.afk"
+
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1; then
+    fail "death record failure: stop unexpectedly succeeded"
+  elif [ -e "$st/state/.afk" ]; then
+    pass "death record failure: away state remains retryable until evidence is durable"
+  else
+    fail "death record failure: stop cleared away state without durable death evidence"
+  fi
+  rm -rf "$st"
+}
+
 unit_concurrent_start_serialized() {
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (concurrent start)"; return 0; }
   local st cap_session cap_pane first second rec count
@@ -1049,6 +1085,8 @@ unit_fresh_vs_refresh
 unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
+unit_restart_records_unexpected_daemon_death
+unit_unexpected_death_record_failure_preserves_away_state
 unit_concurrent_start_serialized
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup

@@ -179,6 +179,17 @@ fm_afk_launch_flag_write() {
   fm_afk_flag_write "$FM_AFK_LAUNCH_STATE"
 }
 
+fm_afk_launch_record_unexpected_death() {
+  if [ -f "$FM_AFK_LAUNCH_STATE/.afk-daemon-died-unexpectedly" ]; then
+    return 0
+  fi
+  if ! : > "$FM_AFK_LAUNCH_STATE/.afk-daemon-died-unexpectedly"; then
+    fm_afk_launch_log "failed to record the unexpected daemon exit"
+    return 1
+  fi
+  fm_afk_launch_log "away-mode daemon was not running while away mode was active; away mode may have been unsupervised since it exited"
+}
+
 # Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET. The third
 # field (a herdr workspace id, kept for the record's own documentation) is not
 # needed to close by id, so it is discarded. Returns 1 when no record exists.
@@ -476,12 +487,6 @@ fm_afk_launch_start() {
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
-  # Capture the captain pane FIRST, before creating anything.
-  captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
-  captain_backend=$(discover_supervisor_backend) || {
-    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
-
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
   if daemon_lock_held_by_live_daemon; then
@@ -494,9 +499,18 @@ fm_afk_launch_start() {
     return 0
   fi
 
-  backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
   if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
     had_afk=1
+    fm_afk_launch_record_unexpected_death || return 1
+  fi
+
+  captain_target=$(discover_supervisor_target) || {
+    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
+  captain_backend=$(discover_supervisor_backend) || {
+    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
+
+  backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
+  if [ "$had_afk" -eq 1 ]; then
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
   for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
@@ -578,11 +592,7 @@ fm_afk_launch_stop() {
     # away-mode stretch must stay visible even when nobody was there to see it
     # happen. bin/fm-afk-return.sh reads this marker and surfaces it in the
     # captain's return catch-up digest.
-    fm_afk_launch_log "away-mode daemon was not running when stop was requested; away mode may have been unsupervised since it exited"
-    : > "$FM_AFK_LAUNCH_STATE/.afk-daemon-died-unexpectedly" || {
-      fm_afk_launch_log "failed to record the unexpected daemon exit"
-      result=1
-    }
+    fm_afk_launch_record_unexpected_death || return 1
   fi
   if [ -n "$pid" ]; then
     if ! kill -TERM "$pid" 2>/dev/null; then
