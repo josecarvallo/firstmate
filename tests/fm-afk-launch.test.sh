@@ -766,18 +766,21 @@ unit_malformed_record_fails_closed() {
 }
 
 unit_stop_malformed_record_fails_closed() {
-  local st
+  local st out status
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-malformed.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.afk"
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
-    . "$1"
-    ! fm_afk_launch_stop
-  ' _ "$LAUNCH" && [ -e "$st/state/.afk" ] && [ -e "$st/state/.afk-daemon-terminal" ]; then
-    pass "stop: malformed terminal record preserves away state and fails closed"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ] \
+    && [ -e "$st/state/.afk" ] \
+    && [ -e "$st/state/.afk-daemon-terminal" ] \
+    && [ -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && printf '%s\n' "$out" | grep -F 'malformed daemon terminal record' >/dev/null; then
+    pass "stop: malformed terminal metadata preserves state and cannot suppress independent death evidence"
   else
-    fail "stop: malformed terminal record cleared protected lifecycle state"
+    fail "stop: malformed terminal metadata suppressed death evidence or changed protected state (status=$status; output: $out)"
   fi
   rm -rf "$st"
 }
@@ -840,7 +843,9 @@ unit_stop_validates_before_signal() {
   printf '%s' "$sleeper_pid" > "$st/state/.supervise-daemon.lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
-  if kill -0 "$sleeper_pid" 2>/dev/null && [ -e "$st/state/.afk" ]; then
+  if kill -0 "$sleeper_pid" 2>/dev/null \
+    && [ -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.afk-daemon-died-unexpectedly" ]; then
     pass "stop validation: malformed record causes no daemon or state side effects"
   else
     fail "stop validation: malformed record signaled daemon or cleared state"

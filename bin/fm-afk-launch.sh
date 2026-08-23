@@ -567,13 +567,16 @@ fm_afk_launch_start_native() {
 
 fm_afk_launch_stop() {
   local pid pid_identity current_identity result=0 read_result afk_was_active=0
+  [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] && afk_was_active=1
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
+    if [ "$afk_was_active" -eq 1 ] && ! daemon_lock_held_by_live_daemon; then
+      fm_afk_launch_record_unexpected_death || true
+    fi
     fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
     return 1
   fi
-  [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] && afk_was_active=1
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
   # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
   # first would make that flush a no-op via inject_msg's presence gate).
