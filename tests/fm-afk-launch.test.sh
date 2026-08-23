@@ -305,6 +305,21 @@ unit_refresh_revalidates_daemon_before_success() {
       mkdir -p "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock"
       printf "%s" "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid"
       fm_pid_identity "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid-identity"
+      printf "tmux\trefresh-session\towned\n" > "$FM_AFK_LAUNCH_RECORD"
+      fm_backend_source() { return 0; }
+      tmux() {
+        case "$1" in
+          has-session)
+            if fm_pid_alive "$daemon_pid"; then
+              return 0
+            fi
+            printf "%s" "can'"'"'t find session: refresh-session" >&2
+            return 1
+            ;;
+          kill-session) return 0 ;;
+        esac
+        return 1
+      }
       fm_afk_launch_flag_write() {
         fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" || return 1
         command kill -TERM "$daemon_pid" 2>/dev/null || true
@@ -1136,6 +1151,64 @@ unit_refresh_validates_record() {
   rm -rf "$st"
 }
 
+unit_refresh_requires_supported_live_terminal() {
+  local mode st daemon_pid lock out status fake_bin
+  for mode in none absent; do
+    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-unsupported.XXXXXX")
+    mkdir -p "$st/state"
+    : > "$st/state/.afk"
+    if [ "$mode" = none ]; then
+      printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+    fi
+    sleep 30 &
+    daemon_pid=$!
+    lock="$st/state/.supervise-daemon.lock"
+    mkdir -p "$lock"
+    printf '%s' "$daemon_pid" > "$lock/pid"
+    ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" )
+    out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ] \
+      && kill -0 "$daemon_pid" 2>/dev/null \
+      && [ -e "$st/state/.afk" ] \
+      && [ ! -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+      && printf '%s\n' "$out" | grep -F "bin/fm-afk-launch.sh stop" >/dev/null \
+      && printf '%s\n' "$out" | grep -F "bin/fm-afk-launch.sh start" >/dev/null; then
+      pass "refresh terminal: live daemon with '$mode' ownership is rejected without false death evidence"
+    else
+      fail "refresh terminal: live daemon with '$mode' ownership was accepted or misclassified"
+    fi
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    rm -rf "$st"
+  done
+
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-supported.XXXXXX")
+  fake_bin="$st/bin"
+  mkdir -p "$st/state" "$fake_bin"
+  printf 'tmux\tsupported-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  printf '#!/usr/bin/env bash\n[ "$1" = has-session ] && exit 0\n[ "$1" != new-session ] || : > "$FM_HOME/unexpected-new-terminal"\nexit 1\n' > "$fake_bin/tmux"
+  chmod +x "$fake_bin/tmux"
+  sleep 30 &
+  daemon_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$daemon_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" )
+  if PATH="$fake_bin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start >/dev/null 2>&1 \
+    && [ -e "$st/state/.afk" ] \
+    && [ -e "$st/state/.afk-daemon-terminal" ] \
+    && [ ! -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && [ ! -e "$st/unexpected-new-terminal" ]; then
+    pass "refresh terminal: verified live tmux ownership refreshes without replacement"
+  else
+    fail "refresh terminal: verified live tmux ownership did not refresh safely"
+  fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
 unit_confirmed_absence_succeeds() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-confirmed-absent.XXXXXX")
@@ -1327,6 +1400,7 @@ unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
 unit_refresh_validates_record
+unit_refresh_requires_supported_live_terminal
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts

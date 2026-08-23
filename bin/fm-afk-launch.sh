@@ -29,8 +29,9 @@
 #                              is already running) launch the daemon in a fresh
 #                              non-visible terminal for the detected backend and
 #                              record it. Idempotent: an already-running daemon
-#                              just refreshes state/.afk; a recorded-but-dead
-#                              terminal is reconciled (closed by id) first.
+#                              with a verified live Herdr/tmux terminal refreshes
+#                              state/.afk; a recorded-but-dead terminal is
+#                              reconciled (closed by id) first.
 #   fm-afk-launch.sh start-native
 #                              REFUSES (see above): no harness's in-pane
 #                              tracked-background tool has survival evidence
@@ -213,11 +214,22 @@ fm_afk_launch_record_read() {
   esac || { fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"; return 2; }
 }
 
-fm_afk_launch_record_validate_if_present() {
+fm_afk_launch_refresh_terminal_valid() {
   local result
   fm_afk_launch_record_read
   result=$?
-  [ "$result" -ne 2 ]
+  if [ "$result" -eq 0 ]; then
+    case "$FM_AFK_REC_BACKEND" in
+      herdr|tmux)
+        if fm_backend_source "$FM_AFK_REC_BACKEND" \
+          && fm_afk_launch_terminal_alive "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET"; then
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  fm_afk_launch_log "live away-mode daemon is not backed by a verified herdr/tmux terminal; run 'bin/fm-afk-launch.sh stop' and then 'bin/fm-afk-launch.sh start'"
+  return 1
 }
 
 # Close a recorded terminal by EXACT id (never a broad sweep). The
@@ -494,7 +506,7 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
 }
 
 fm_afk_launch_refresh_active_daemon() {
-  fm_afk_launch_record_validate_if_present || return 1
+  fm_afk_launch_refresh_terminal_valid || return 1
   if ! fm_afk_launch_flag_write; then
     fm_afk_launch_log "failed to refresh away-mode flag"
     return 1
