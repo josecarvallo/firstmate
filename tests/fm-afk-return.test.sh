@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Deterministic return-catch-up gate regression.
 #
-# Covers the second half of the 2026-07-14 incident: an away-mode blocked event
-# survived in durable state, but the ordinary return request could proceed to
-# Bearings before Firstmate owned remediation. The shared script now stops,
-# drains, preserves evidence, and refuses ordinary work until every live open
-# `blocked:` event is resolved or durably reclassified.
+# Verifies that the shared return owner stops away mode, drains and preserves
+# evidence, gates mutating work behind every live open `blocked:` event, and lets
+# only a read-only status or Bearings report proceed while surfacing that pending
+# catch-up prominently.
 set -u
 
 # shellcheck source=tests/lib.sh
