@@ -244,7 +244,7 @@ test_answer_enumerates_every_live_ledger() {
   if printf '%s' "$out" | grep -F '[key=all-copies]' >/dev/null; then
     fail "the parent-channel copy remained open after the shared answer: $out"
   fi
-  [ "$(cat "$tasks/all-copies.state")" = done ] \
+  [ "$(cat "$tasks/all-copies.state")" = 'done' ] \
     || fail "the local captain-held copy was not closed by the shared answer"
 
   fm_write_meta "$mate/state/w8.meta" "window=sess:fm-w8" "kind=ship"
