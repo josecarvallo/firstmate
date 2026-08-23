@@ -463,7 +463,10 @@ if [ -n "$RESOLVE_KEYS" ]; then
   fi
   RESOLVE_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
   RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
-  resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  if ! resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE"); then
+    echo "error: --resolve-key: $RESOLVE_STATUS_FILE cannot be read as a regular status ledger; nothing was sent." >&2
+    exit 1
+  fi
   # Resolve this home's parent escalation channel BEFORE anything is sent, so an
   # identified secondmate home whose parent binding cannot be read refuses here
   # instead of closing only its local copy and stranding the upstream one.
@@ -475,8 +478,11 @@ if [ -n "$RESOLVE_KEYS" ]; then
   fi
   [ "$resolve_parent_rc" -eq 0 ] || RESOLVE_PARENT_CHANNEL=
   resolve_parent_open_set=
-  [ -z "$RESOLVE_PARENT_CHANNEL" ] \
-    || resolve_parent_open_set=$(status_open_decisions "$RESOLVE_PARENT_CHANNEL")
+  if [ -n "$RESOLVE_PARENT_CHANNEL" ] \
+      && ! resolve_parent_open_set=$(status_open_decisions "$RESOLVE_PARENT_CHANNEL"); then
+    echo "error: --resolve-key: the parent escalation channel cannot be read as a regular decision ledger; nothing was sent." >&2
+    exit 1
+  fi
   for k in $RESOLVE_KEYS; do
     resolve_key_owned=0
     case "$resolve_open_set" in

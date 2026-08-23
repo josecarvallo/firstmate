@@ -65,12 +65,14 @@ fm_parent_channel_self_id() {  # <home>
 
 fm_parent_channel_path_usable() {  # <path>
   local path=$1 dir
+  dir=$(dirname "$path")
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -w "$dir" ] && [ -x "$dir" ] \
+    || return 1
   if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ]
+    [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] && [ -w "$path" ]
     return
   fi
-  dir=$(dirname "$path")
-  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -w "$dir" ]
+  return 0
 }
 
 # Resolve this home's parent escalation channel.
@@ -140,17 +142,20 @@ fm_parent_channel_append() {
         printf '%s\n' "$line" >> "$path" || rc=1
         ;;
       transition)
-        open=$(status_open_decisions "$path")
-        case "$open" in
-          "$key"$'\t'*|*$'\n'"$key"$'\t'*) is_open=1 ;;
-        esac
-        if { [ "$action" = open ] && [ "$is_open" -eq 0 ]; } \
-          || { [ "$action" = close ] && [ "$is_open" -eq 1 ]; }; then
-          if [ -n "$self_state" ]; then
-            fm_wake_status_append_self_announced "$self_state" "$path" "$line" || append_rc=$?
-            [ "$append_rc" -ne 2 ] || rc=1
-          else
-            printf '%s\n' "$line" >> "$path" || rc=1
+        if ! open=$(status_open_decisions "$path"); then
+          rc=1
+        else
+          case "$open" in
+            "$key"$'\t'*|*$'\n'"$key"$'\t'*) is_open=1 ;;
+          esac
+          if { [ "$action" = open ] && [ "$is_open" -eq 0 ]; } \
+            || { [ "$action" = close ] && [ "$is_open" -eq 1 ]; }; then
+            if [ -n "$self_state" ]; then
+              fm_wake_status_append_self_announced "$self_state" "$path" "$line" || append_rc=$?
+              [ "$append_rc" -ne 2 ] || rc=1
+            else
+              printf '%s\n' "$line" >> "$path" || rc=1
+            fi
           fi
         fi
         ;;

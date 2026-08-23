@@ -176,6 +176,11 @@ dispatch_channel() {  # <home> <state> <dispatch args...>
     "$ROOT/bin/fm-parent-channel-lib.sh" "$@"
 }
 
+fold_status() {  # <status-path>
+  bash -c '. "$1"; status_open_decisions "$2"' \
+    _ "$ROOT/bin/fm-classify-lib.sh" "$1"
+}
+
 # ---------------------------------------------------------------------------
 # 1. The full cycle, exactly as it failed in the field.
 # ---------------------------------------------------------------------------
@@ -438,7 +443,7 @@ test_primary_home_unaffected_and_broken_binding_refuses() {
 
 # The resolver accepts only a positively usable channel shape.
 test_channel_requires_positive_usable_shape() {
-  local dir fb log parent mate pair rc err channel
+  local dir fb log parent mate pair rc err channel target out bad_parent bad_mate bad_pair
   dir="$TMP_ROOT/channel-shapes"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/err.log"
   pair=$(setup_pair channel-shapes eta)
@@ -459,6 +464,10 @@ test_channel_requires_positive_usable_shape() {
   [ -f "$channel" ] || fail "the first escalation did not create a regular channel file"
   rm -f "$channel"
 
+  out=$(fold_status "$dir/absent.status"); rc=$?
+  expect_code 0 "$rc" "a genuinely absent status ledger must still fold successfully"
+  [ -z "$out" ] || fail "an absent status ledger unexpectedly reported decisions: $out"
+
   mkdir "$channel"
   rc=0; resolve_channel "$mate" "$mate/state" || rc=$?
   expect_code 2 "$rc" "a directory in place of the channel must be unresolvable"
@@ -478,20 +487,79 @@ test_channel_requires_positive_usable_shape() {
   expect_code 2 "$rc" "a FIFO in place of the channel must be unresolvable"
   rm -f "$channel"
 
+  target="$dir/regular-target"
+  printf 'working: target\n' > "$target"
+  ln -s "$target" "$channel"
+  rc=0; resolve_channel "$mate" "$mate/state" || rc=$?
+  expect_code 2 "$rc" "a channel symlink must be unresolvable even when its target is regular"
+  rm -f "$channel"
+
   ln -s "$dir/missing-target" "$channel"
   rc=0; resolve_channel "$mate" "$mate/state" || rc=$?
   expect_code 2 "$rc" "a dangling channel symlink must be unresolvable"
   rm -f "$channel"
 
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "skip: read-only parent channel shape cannot be represented for root"
+  else
+    printf 'needs-decision [key=sneaky]: a or b\n' > "$channel"
+    chmod 400 "$channel"
+    rc=0; resolve_channel "$mate" "$mate/state" || rc=$?
+    expect_code 2 "$rc" "a read-only regular channel must be unresolvable"
+    chmod 600 "$channel"
+    rm -f "$channel"
+  fi
+
   printf 'needs-decision [key=sneaky]: a or b\n' > "$channel"
   chmod 000 "$channel"
-  if [ -r "$channel" ]; then
-    echo "skip: unreadable parent channel shape cannot be represented for this privileged test user"
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "skip: unreadable parent channel shape cannot be represented for root"
   else
     rc=0; resolve_channel "$mate" "$mate/state" || rc=$?
     expect_code 2 "$rc" "an unreadable regular channel must be unresolvable"
+    rc=0; fold_status "$channel" >/dev/null || rc=$?
+    expect_code 2 "$rc" "an unreadable existing ledger must differ from an absent ledger"
+    : > "$log"
+    env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+      FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+      "$SEND" w4 --resolve-key sneaky "a" >/dev/null 2>"$err"; rc=$?
+    [ "$rc" -ne 0 ] || fail "an unreadable parent channel did not refuse before sending"
+    [ ! -s "$log" ] || fail "the unreadable-channel refusal still typed text: $(cat "$log")"
+    if grep -F 'resolved' "$mate/state/w4.status" >/dev/null; then
+      fail "the unreadable parent channel allowed the local copy to close"
+    fi
+    chmod 600 "$channel"
+    out=$(drain_out "$parent")
+    printf '%s' "$out" | grep -F '[key=sneaky]' >/dev/null \
+      || fail "the unreadable-channel refusal lost the still-open upstream decision: $out"
   fi
   chmod 600 "$channel"
+
+  rm -f "$channel"
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "skip: non-writable parent directory shape cannot be represented for root"
+  else
+    chmod 500 "$parent/state"
+    rc=0; resolve_channel "$mate" "$mate/state" || rc=$?
+    expect_code 2 "$rc" "an absent channel in a non-writable parent directory must be unresolvable"
+    chmod 700 "$parent/state"
+
+    chmod 600 "$parent/state"
+    rc=0; resolve_channel "$mate" "$mate/state" || rc=$?
+    expect_code 2 "$rc" "an absent channel in a non-searchable parent directory must be unresolvable"
+    chmod 700 "$parent/state"
+  fi
+
+  bad_pair=$(setup_pair bad-parent-component lambda)
+  bad_parent=${bad_pair% *}; bad_mate=${bad_pair#* }
+  rmdir "$bad_parent/state"
+  printf 'not a directory\n' > "$bad_parent/state"
+  rc=0; resolve_channel "$bad_mate" "$bad_mate/state" || rc=$?
+  expect_code 2 "$rc" "a regular file in place of the channel parent directory must be unresolvable"
+
+  printf 'needs-decision [key=ordinary]: a or b\n' > "$channel"
+  resolve_channel "$mate" "$mate/state" \
+    || fail "an ordinary readable and writable channel must remain resolvable"
   pass "parent channel: only a positively usable channel shape resolves"
 }
 
