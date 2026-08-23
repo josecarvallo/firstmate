@@ -155,8 +155,84 @@ run_teardown() {
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_TEARDOWN_GUARD_DONE=1 \
   FM_DOCKER_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+  FM_FAKE_DOCKER_STATE="$case_dir/docker.state" \
+  FM_FAKE_DOCKER_STOP_FAIL_ID="${FM_FAKE_DOCKER_STOP_FAIL_ID:-}" \
+  FM_FAKE_DOCKER_RM_FAIL_ID="${FM_FAKE_DOCKER_RM_FAIL_ID:-}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" "$id" "$@"
+}
+
+install_stateful_docker() {
+  local case_dir=$1
+  : > "$case_dir/docker.state"
+  cat > "$case_dir/fakebin/docker" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_FAKE_DOCKER_STATE:?}
+case "${1:-}" in
+  info)
+    exit 0
+    ;;
+  ps)
+    filter=
+    for arg in "$@"; do
+      case "$arg" in
+        label=com.docker.compose.project.working_dir=*)
+          filter=${arg#label=com.docker.compose.project.working_dir=}
+          ;;
+      esac
+    done
+    [ -f "$state" ] || exit 0
+    awk -F '\t' -v label="$filter" '$2 == label { print $1 }' "$state"
+    ;;
+  stop)
+    id=${2:-}
+    [ "${FM_FAKE_DOCKER_STOP_FAIL_ID:-}" != "$id" ] || exit 1
+    tmp="${state}.tmp.$$"
+    awk -F '\t' -v OFS='\t' -v id="$id" '$1 == id { $3 = "stopped" } { print }' "$state" > "$tmp" \
+      && mv "$tmp" "$state"
+    ;;
+  rm)
+    id=${3:-}
+    [ "${FM_FAKE_DOCKER_RM_FAIL_ID:-}" != "$id" ] || exit 1
+    tmp="${state}.tmp.$$"
+    awk -F '\t' -v OFS='\t' -v id="$id" '$1 != id { print }' "$state" > "$tmp" \
+      && mv "$tmp" "$state"
+    ;;
+  inspect)
+    id=${!#}
+    status=$(awk -F '\t' -v id="$id" '$1 == id { print $3; exit }' "$state")
+    [ -n "$status" ] || exit 1
+    if [ "$status" = running ]; then
+      echo true
+    else
+      echo false
+    fi
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/docker"
+}
+
+seed_fake_docker_container() {
+  local case_dir=$1 id=$2 label=$3
+  printf '%s\t%s\trunning\n' "$id" "$label" >> "$case_dir/docker.state"
+}
+
+fake_docker_container_ids() {
+  local case_dir=$1 label=$2
+  FM_FAKE_DOCKER_STATE="$case_dir/docker.state" \
+    "$case_dir/fakebin/docker" ps -aq \
+      --filter "label=com.docker.compose.project.working_dir=$label"
+}
+
+fake_docker_container_running() {
+  local case_dir=$1 id=$2
+  FM_FAKE_DOCKER_STATE="$case_dir/docker.state" \
+    "$case_dir/fakebin/docker" inspect -f '{{.State.Running}}' "$id"
 }
 
 # Build a PATH with every common tool except docker, so `command -v docker`
@@ -301,6 +377,78 @@ test_docker_stack_isolation_leaves_other_task_untouched() {
   [ "$state" = "true" ] || fail "docker-stack-isolation: task B's container is no longer running after task A's teardown"
 
   pass "tearing down task A's docker stack leaves task B's unrelated, concurrently-live stack fully intact"
+}
+
+test_portable_docker_stack_is_stopped_on_teardown() {
+  local id=docker-portable-core case_dir abs_wt ids rc
+  case_dir=$(make_case "$id")
+  abs_wt=$(canon "$case_dir/wt")
+  install_stateful_docker "$case_dir"
+  seed_fake_docker_container "$case_dir" portable-core "$abs_wt"
+
+  ids=$(fake_docker_container_ids "$case_dir" "$abs_wt")
+  [ "$ids" = portable-core ] || fail "docker-portable-core: fixture did not expose the task container"
+
+  set +e
+  run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-portable-core: teardown should succeed"
+
+  ids=$(fake_docker_container_ids "$case_dir" "$abs_wt")
+  [ -z "$ids" ] || fail "docker-portable-core: task container remains after teardown"
+  assert_absent "$case_dir/wt" \
+    "docker-portable-core: treehouse did not return the worktree after docker cleanup"
+  pass "portable teardown removes its task's docker container before returning the worktree"
+}
+
+test_portable_docker_stack_isolation() {
+  local id_a=docker-portable-iso-a id_b=docker-portable-iso-b case_a case_b abs_a abs_b ids_a ids_b rc state
+  case_a=$(make_case "$id_a")
+  case_b=$(make_case "$id_b")
+  abs_a=$(canon "$case_a/wt")
+  abs_b=$(canon "$case_b/wt")
+  install_stateful_docker "$case_a"
+  seed_fake_docker_container "$case_a" portable-a "$abs_a"
+  seed_fake_docker_container "$case_a" portable-b "$abs_b"
+
+  set +e
+  run_teardown "$case_a" "$id_a" --force > "$case_a/stdout" 2> "$case_a/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-portable-isolation: teardown of task A should succeed"
+
+  ids_a=$(fake_docker_container_ids "$case_a" "$abs_a")
+  [ -z "$ids_a" ] || fail "docker-portable-isolation: task A's container remains after teardown"
+  ids_b=$(fake_docker_container_ids "$case_a" "$abs_b")
+  [ "$ids_b" = portable-b ] || fail "docker-portable-isolation: teardown of task A removed task B's container"
+  state=$(fake_docker_container_running "$case_a" portable-b)
+  [ "$state" = true ] || fail "docker-portable-isolation: task B's container is no longer running"
+  pass "portable teardown leaves another task's docker stack intact"
+}
+
+test_docker_removal_failure_is_reported_and_non_blocking() {
+  local id=docker-remove-fail case_dir abs_wt rc state
+  case_dir=$(make_case "$id")
+  abs_wt=$(canon "$case_dir/wt")
+  install_stateful_docker "$case_dir"
+  seed_fake_docker_container "$case_dir" sticky-container "$abs_wt"
+
+  set +e
+  FM_FAKE_DOCKER_STOP_FAIL_ID=sticky-container \
+  FM_FAKE_DOCKER_RM_FAIL_ID=sticky-container \
+    run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-remove-fail: removal failure should not block teardown"
+
+  state=$(fake_docker_container_running "$case_dir" sticky-container)
+  [ "$state" = true ] || fail "docker-remove-fail: fixture did not preserve the failed container"
+  assert_grep "could not confirm removal" "$case_dir/stderr" \
+    "docker-remove-fail: teardown did not report the failed removal"
+  assert_grep "sticky-container" "$case_dir/stderr" \
+    "docker-remove-fail: teardown did not identify the container requiring manual inspection"
+  pass "a failed docker removal is visible and does not block teardown"
 }
 
 test_docker_absent_does_not_break_teardown() {
@@ -465,6 +613,9 @@ test_docker_stack_never_touches_unregistered_directory() {
   pass "a worktree field pointing at a real but unregistered directory never reaches its docker containers"
 }
 
+test_portable_docker_stack_is_stopped_on_teardown
+test_portable_docker_stack_isolation
+test_docker_removal_failure_is_reported_and_non_blocking
 test_docker_absent_does_not_break_teardown
 test_docker_daemon_unreachable_does_not_break_teardown
 test_no_docker_stack_present_completes_silently

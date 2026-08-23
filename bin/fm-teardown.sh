@@ -1556,7 +1556,7 @@ EOF
 # itself fails, this reports the failure and leaves every container alone
 # rather than guess - also non-blocking, since this cleanup is best effort.
 teardown_task_docker_stack() {  # <worktree-dir> <project>
-  local dir=$1 project=$2 abs_dir abs_home abs_root ids id count
+  local dir=$1 project=$2 abs_dir abs_home abs_root ids id count failed_ids=
   [ -n "$dir" ] || return 0
   command -v docker >/dev/null 2>&1 || return 0
   docker info >/dev/null 2>&1 || return 0
@@ -1585,10 +1585,15 @@ teardown_task_docker_stack() {  # <worktree-dir> <project>
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     docker stop "$id" >/dev/null 2>&1 || true
-    docker rm -f "$id" >/dev/null 2>&1 || true
+    if ! docker rm -f "$id" >/dev/null 2>&1; then
+      failed_ids="${failed_ids}${failed_ids:+ }$id"
+    fi
   done <<EOF
 $ids
 EOF
+  if [ -n "$failed_ids" ]; then
+    echo "warning: could not confirm removal of docker container(s) for task $ID's worktree $abs_dir: $failed_ids; inspect them manually" >&2
+  fi
 }
 
 require_orca_worktree_path_match() {
