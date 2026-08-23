@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# Tests for bin/fm-teardown.sh's docker-compose-stack cleanup (Fix 4 in that
+# script's header).
+#
+# Before this fix, a task's worktree could leave a docker compose stack
+# running forever after teardown, because nothing ever brought it down.
+# Observed cost on the captain's machine (2026-08-23): 119 live containers
+# left behind by finished tasks, system load 150, the captain's own local
+# database killed twice.
+#
+# Covers:
+#   - the core fix: a task's own docker containers are stopped and removed by
+#     its teardown (test_docker_stack_is_stopped_on_teardown, which FAILS
+#     against the pre-fix script).
+#   - isolation, the most important property: tearing down one task's stack
+#     never touches a second task's unrelated stack, even though both are
+#     live at the same time (test_docker_stack_isolation_leaves_other_task_untouched).
+#   - an absent docker binary, an unreachable daemon, and a task that never
+#     started a stack are all ordinary, silent no-ops.
+#   - a container-enumeration failure (daemon reachable, query itself fails)
+#     is reported visibly and never blocks teardown.
+#
+# The whole file is gated on a real, reachable docker daemon: the isolation
+# test in particular needs real containers, not mocks, to mean anything.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_git_identity fmtest fmtest@example.invalid
+
+command -v docker >/dev/null 2>&1 || { echo "skip: docker not found"; exit 0; }
+docker info >/dev/null 2>&1 || { echo "skip: docker daemon not reachable"; exit 0; }
+
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
+TMP_ROOT=$(fm_test_tmproot fm-teardown-docker-stack)
+
+DOCKER_CLEANUP_CONTAINER_IDS=()
+DOCKER_CLEANUP_NETWORKS=()
+
+# tests/lib.sh already owns an EXIT trap for TMP_ROOT; a file with extra
+# teardown defines its own trap and calls fm_test_cleanup from inside it (see
+# that file's "self-cleaning temp root" section) so both run.
+docker_test_cleanup() {
+  local id net
+  for id in "${DOCKER_CLEANUP_CONTAINER_IDS[@]:-}"; do
+    [ -n "$id" ] && docker rm -f "$id" >/dev/null 2>&1
+  done
+  for net in "${DOCKER_CLEANUP_NETWORKS[@]:-}"; do
+    [ -n "$net" ] && docker network rm "$net" >/dev/null 2>&1
+  done
+  fm_test_cleanup
+}
+trap docker_test_cleanup EXIT
+trap 'docker_test_cleanup; exit 130' INT
+trap 'docker_test_cleanup; exit 143' TERM
+
+canon() {  # <dir>
+  ( cd "$1" && pwd -P )
+}
+
+# Build a fresh sandbox for one task: a bare origin, a project clone, and a
+# worktree on its own branch, plus fakebin mocks so teardown never reaches a
+# real treehouse/tmux/gh/no-mistakes. Every case uses --force (landed-work
+# safety is covered by tests/fm-teardown.test.sh, not this file), so the
+# gh/no-mistakes mocks only need to be safe no-ops. Args: <task-id>
+make_case() {
+  local id=$1 case_dir fakebin
+  case_dir="$TMP_ROOT/$id"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
+  "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/_seed"
+  git -C "$case_dir/_seed" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "origin baseline"
+  git -C "$case_dir/_seed" push -q origin main
+  rm -rf "$case_dir/_seed"
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b "fm/$id" "$case_dir/wt" main
+
+  touch "$case_dir/state/.last-watcher-beat"
+
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+
+  printf '%s\n' "$case_dir"
+}
+
+# Run teardown with PATH mocking. FM_TEARDOWN_GUARD_DONE=1 skips fm-guard.sh's
+# unrelated worktree-tangle check, which otherwise inspects $ROOT itself (this
+# repo) and is noisy whenever $ROOT happens to be on a non-default branch, as a
+# task worktree normally is - not something this docker-focused suite tests.
+# Args: <case_dir> <id> [extra args...]
+run_teardown() {
+  local case_dir=$1 id=$2; shift 2
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_TEARDOWN_GUARD_DONE=1 \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" "$@"
+}
+
+# Build a PATH with every common tool except docker, so `command -v docker`
+# genuinely fails - the "docker not installed" case. Mirrors
+# tests/fm-teardown.test.sh's make_path_without_lsof for the same reason:
+# there is no portable way to hide one binary from a live PATH other than
+# building a curated one.
+make_path_without_docker() {  # <case-dir>
+  local case_dir=$1 path_dir="$1/path-without-docker" cmd resolved
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+    lsof mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
+}
+
+# Start a one-container docker compose stack rooted exactly at <dir>, so its
+# com.docker.compose.project.working_dir label equals <dir>. Registers the
+# stack's default network for this file's own cleanup (the fix under test only
+# removes containers, matching the acceptance bar of "no live containers
+# left", so the network is this test's own housekeeping, not something the
+# fix is expected to touch). Args: <dir> <project>
+start_docker_stack() {
+  local dir=$1 project=$2 out
+  cat > "$dir/docker-compose.yml" <<'YML'
+services:
+  sleeper:
+    image: busybox
+    command: sleep 3600
+YML
+  if ! out=$(docker compose -p "$project" -f "$dir/docker-compose.yml" --project-directory "$dir" up -d 2>&1); then
+    fail "docker fixture: failed to start compose stack '$project' in $dir: $out"
+  fi
+  DOCKER_CLEANUP_NETWORKS+=("${project}_default")
+}
+
+docker_stack_container_ids() {  # <abs-dir>
+  docker ps -aq --filter "label=com.docker.compose.project.working_dir=$1" 2>/dev/null
+}
+
+record_container_ids_for_cleanup() {  # <ids, one per line>
+  local cid
+  while IFS= read -r cid; do
+    [ -n "$cid" ] && DOCKER_CLEANUP_CONTAINER_IDS+=("$cid")
+  done <<EOF
+$1
+EOF
+}
+
+test_docker_stack_is_stopped_on_teardown() {
+  local id=docker-core case_dir abs_wt project ids rc
+  case_dir=$(make_case "$id")
+  abs_wt=$(canon "$case_dir/wt")
+  project="fmtest-${id//[^a-z0-9]/}-$$"
+  start_docker_stack "$abs_wt" "$project"
+
+  ids=$(docker_stack_container_ids "$abs_wt")
+  [ -n "$ids" ] || fail "docker-stack-core: fixture did not start any container under $abs_wt"
+  record_container_ids_for_cleanup "$ids"
+
+  set +e
+  run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-stack-core: teardown should succeed"
+
+  ids=$(docker_stack_container_ids "$abs_wt")
+  [ -z "$ids" ] || fail "docker-stack-core: container(s) for $abs_wt are still alive after teardown: $ids"
+  pass "teardown stops and removes the docker container(s) started by its own worktree"
+}
+
+test_docker_stack_isolation_leaves_other_task_untouched() {
+  local id_a=docker-iso-a id_b=docker-iso-b case_a case_b abs_a abs_b proj_a proj_b ids_a ids_b rc state
+
+  case_a=$(make_case "$id_a")
+  case_b=$(make_case "$id_b")
+  abs_a=$(canon "$case_a/wt")
+  abs_b=$(canon "$case_b/wt")
+  proj_a="fmtest-${id_a//[^a-z0-9]/}-$$"
+  proj_b="fmtest-${id_b//[^a-z0-9]/}-$$"
+  start_docker_stack "$abs_a" "$proj_a"
+  start_docker_stack "$abs_b" "$proj_b"
+
+  ids_a=$(docker_stack_container_ids "$abs_a")
+  ids_b=$(docker_stack_container_ids "$abs_b")
+  [ -n "$ids_a" ] || fail "docker-stack-isolation: fixture did not start task A's container"
+  [ -n "$ids_b" ] || fail "docker-stack-isolation: fixture did not start task B's container"
+  record_container_ids_for_cleanup "$ids_a"
+  record_container_ids_for_cleanup "$ids_b"
+
+  set +e
+  run_teardown "$case_a" "$id_a" --force > "$case_a/stdout" 2> "$case_a/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-stack-isolation: teardown of task A should succeed"
+
+  ids_a=$(docker_stack_container_ids "$abs_a")
+  [ -z "$ids_a" ] || fail "docker-stack-isolation: task A's own container(s) are still alive after its teardown"
+
+  ids_b=$(docker_stack_container_ids "$abs_b")
+  [ -n "$ids_b" ] || fail "docker-stack-isolation: tearing down task A also removed task B's container(s) - isolation failure"
+  state=$(docker inspect -f '{{.State.Running}}' "$ids_b" 2>/dev/null | head -1)
+  [ "$state" = "true" ] || fail "docker-stack-isolation: task B's container is no longer running after task A's teardown"
+
+  pass "tearing down task A's docker stack leaves task B's unrelated, concurrently-live stack fully intact"
+}
+
+test_docker_absent_does_not_break_teardown() {
+  local id=docker-absent case_dir path_no_docker rc
+  case_dir=$(make_case "$id")
+  path_no_docker=$(make_path_without_docker "$case_dir")
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_TEARDOWN_GUARD_DONE=1 \
+  PATH="$case_dir/fakebin:$path_no_docker" \
+    "$TEARDOWN" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-absent: teardown should succeed when docker is not installed"
+  assert_no_grep "cannot enumerate docker" "$case_dir/stderr" \
+    "docker-absent: should not attempt to enumerate docker containers"
+  assert_no_grep "stopping" "$case_dir/stderr" \
+    "docker-absent: should never report stopping a container it could not have found"
+  pass "an absent docker binary is a silent no-op and never breaks teardown"
+}
+
+test_docker_daemon_unreachable_does_not_break_teardown() {
+  local id=docker-no-daemon case_dir rc
+  case_dir=$(make_case "$id")
+  cat > "$case_dir/fakebin/docker" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  info) exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/docker"
+
+  set +e
+  run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-no-daemon: teardown should succeed when the daemon is unreachable"
+  assert_no_grep "cannot enumerate docker" "$case_dir/stderr" \
+    "docker-no-daemon: an unreachable daemon should be a silent normal case, not a reported warning"
+  pass "an unreachable docker daemon is a silent no-op and never breaks teardown"
+}
+
+test_no_docker_stack_present_completes_silently() {
+  local id=docker-no-stack case_dir rc
+  case_dir=$(make_case "$id")
+
+  set +e
+  run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "no-docker-stack: teardown should succeed when the task never started a docker stack"
+  assert_no_grep "cannot enumerate docker" "$case_dir/stderr" \
+    "no-docker-stack: should not report an enumeration failure when there is none"
+  assert_no_grep "stopping" "$case_dir/stderr" \
+    "no-docker-stack: should never report stopping a container when it never started one"
+  pass "a task that never started a docker stack tears down silently"
+}
+
+test_docker_enumeration_failure_is_reported_and_non_blocking() {
+  local id=docker-enum-fail case_dir rc
+  case_dir=$(make_case "$id")
+  cat > "$case_dir/fakebin/docker" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  info) exit 0 ;;
+  ps) echo "docker: simulated enumeration failure" >&2 ; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/docker"
+
+  set +e
+  run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-enum-fail: a container-enumeration failure should never block teardown"
+  assert_grep "cannot enumerate docker containers" "$case_dir/stderr" \
+    "docker-enum-fail: teardown should visibly report that it could not identify the docker stack"
+  pass "a docker enumeration failure is reported visibly and never blocks teardown"
+}
+
+test_docker_stack_is_stopped_on_teardown
+test_docker_stack_isolation_leaves_other_task_untouched
+test_docker_absent_does_not_break_teardown
+test_docker_daemon_unreachable_does_not_break_teardown
+test_no_docker_stack_present_completes_silently
+test_docker_enumeration_failure_is_reported_and_non_blocking

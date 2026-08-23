@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
-# clear volatile state, refresh/prune the project's clone for PR-based ship
-# tasks, then print a backlog-refresh reminder for ship and scout teardowns
-# (a secondmate teardown prints none, since secondmates are not backlog items).
+# worktree, or retire a secondmate home; bring down the task's own docker
+# compose stack; kill the recorded runtime endpoint, clear volatile state,
+# refresh/prune the project's clone for PR-based ship tasks, then print a
+# backlog-refresh reminder for ship and scout teardowns (a secondmate teardown
+# prints none, since secondmates are not backlog items).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -133,6 +134,21 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+#   Fix 4 - bring down this task's own docker compose stack. A worker that
+#     started a docker compose stack (a local database, a supporting service)
+#     inside its own worktree left every container running forever once the
+#     worktree was returned - accumulated across many finished tasks, this
+#     overloaded the captain's machine (119 live containers, load 150,
+#     observed 2026-08-23; the captain's own local database was killed twice).
+#     teardown_task_docker_stack identifies the stack ONLY by docker's own
+#     com.docker.compose.project.working_dir container label matching this
+#     exact task worktree's canonical path - never a name pattern, a broad
+#     sweep, or any other task's or home's containers - then stops and removes
+#     exactly those containers. A missing docker binary, an unreachable daemon,
+#     or a stack already down are ordinary silent no-ops. When the daemon
+#     answers but enumeration itself fails, this reports the failure plainly
+#     and leaves every container alone rather than guess. Best effort: never
+#     blocks or refuses this teardown.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1514,6 +1530,37 @@ EOF
   return 1
 }
 
+# Fix 4 (see script header): stop and remove exactly the containers of the
+# docker compose stack this task's own worktree started, identified only by
+# docker's own com.docker.compose.project.working_dir container label matching
+# this worktree's canonical path. Never a name pattern, never a broader query.
+# A missing docker binary or an unreachable daemon are ordinary silent no-ops
+# (return 0), matching the "docker absent/daemon down is normal" contract in
+# the script header. When the daemon is reachable but the container query
+# itself fails, this reports the failure and leaves every container alone
+# rather than guess - also non-blocking, since this cleanup is best effort.
+teardown_task_docker_stack() {  # <worktree-dir>
+  local dir=$1 abs_dir ids id count
+  [ -n "$dir" ] || return 0
+  command -v docker >/dev/null 2>&1 || return 0
+  docker info >/dev/null 2>&1 || return 0
+  abs_dir=$(canonical_existing_dir "$dir") || return 0
+  if ! ids=$(docker ps -aq --filter "label=com.docker.compose.project.working_dir=$abs_dir" 2>&1); then
+    echo "warning: cannot enumerate docker containers for task $ID's worktree $abs_dir ($ids); leaving any docker stack in place for manual inspection" >&2
+    return 0
+  fi
+  [ -n "$ids" ] || return 0
+  count=$(printf '%s\n' "$ids" | grep -c .)
+  echo "teardown: stopping $count docker container(s) started by task $ID's own worktree ($abs_dir)" >&2
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    docker stop "$id" >/dev/null 2>&1 || true
+    docker rm -f "$id" >/dev/null 2>&1 || true
+  done <<EOF
+$ids
+EOF
+}
+
 require_orca_worktree_path_match() {
   local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
   resolved=$(fm_backend_worktree_path orca "$worktree_id") || {
@@ -2385,6 +2432,7 @@ fi
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  teardown_task_docker_stack "$WT"
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
