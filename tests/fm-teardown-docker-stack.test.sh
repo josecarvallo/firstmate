@@ -22,20 +22,23 @@
 #   - the identity guard: a "worktree=" meta field corrupted to point at the
 #     firstmate home/repo itself, or at a real but unregistered directory,
 #     never lets docker cleanup reach a container labeled with that path
-#     (test_docker_stack_never_touches_firstmate_home_or_root,
+#     (test_docker_stack_never_touches_firstmate_root,
+#     test_docker_stack_never_touches_firstmate_home,
 #     test_docker_stack_never_touches_unregistered_directory).
 #
-# The whole file is gated on a real, reachable docker daemon: the isolation
-# and identity-guard tests in particular need real containers, not mocks, to
-# mean anything.
+# The ordinary-case tests run with docker mocks everywhere. The core,
+# isolation, and identity-guard cases additionally use real containers when a
+# reachable daemon is available.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
-command -v docker >/dev/null 2>&1 || { echo "skip: docker not found"; exit 0; }
-docker info >/dev/null 2>&1 || { echo "skip: docker daemon not reachable"; exit 0; }
+REAL_DOCKER_AVAILABLE=0
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  REAL_DOCKER_AVAILABLE=1
+fi
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-docker-stack)
@@ -48,12 +51,14 @@ DOCKER_CLEANUP_NETWORKS=()
 # that file's "self-cleaning temp root" section) so both run.
 docker_test_cleanup() {
   local id net
-  for id in "${DOCKER_CLEANUP_CONTAINER_IDS[@]:-}"; do
-    [ -n "$id" ] && docker rm -f "$id" >/dev/null 2>&1
-  done
-  for net in "${DOCKER_CLEANUP_NETWORKS[@]:-}"; do
-    [ -n "$net" ] && docker network rm "$net" >/dev/null 2>&1
-  done
+  if [ "$REAL_DOCKER_AVAILABLE" = 1 ]; then
+    for id in "${DOCKER_CLEANUP_CONTAINER_IDS[@]:-}"; do
+      [ -n "$id" ] && docker rm -f "$id" >/dev/null 2>&1
+    done
+    for net in "${DOCKER_CLEANUP_NETWORKS[@]:-}"; do
+      [ -n "$net" ] && docker network rm "$net" >/dev/null 2>&1
+    done
+  fi
   fm_test_cleanup
 }
 trap docker_test_cleanup EXIT
@@ -73,10 +78,14 @@ make_case() {
   local id=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$id"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/home" \
+    "$case_dir/firstmate-root" "$fakebin"
 
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+wt=${3:-}
+printf '%s\n' "$wt" >> "${FM_DOCKER_TREEHOUSE_LOG:?}"
+[ -z "$wt" ] || git worktree remove --force "$wt" >/dev/null 2>&1 || true
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -102,7 +111,12 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" \
+    "$fakebin/no-mistakes" "$fakebin/lsof"
 
   git init -q --bare "$case_dir/origin.git"
   git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
@@ -135,10 +149,12 @@ SH
 # Args: <case_dir> <id> [extra args...]
 run_teardown() {
   local case_dir=$1 id=$2; shift 2
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/home" \
+  FM_ROOT_OVERRIDE="$case_dir/firstmate-root" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_TEARDOWN_GUARD_DONE=1 \
+  FM_DOCKER_TREEHOUSE_LOG="$case_dir/treehouse.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" "$id" "$@"
 }
@@ -212,16 +228,17 @@ corrupt_meta_worktree() {
 # real stack would have, without needing a real compose stack rooted there -
 # so the identity-guard tests below can label a container with the firstmate
 # repo's own path, or an unregistered directory's path, without actually
-# running docker compose against either. Echoes the container id.
-# Args: <working-dir-label-value>
+# running docker compose against either. Stores the container id in the named
+# caller variable and registers it for cleanup in this shell.
+# Args: <working-dir-label-value> <result-variable>
 start_labeled_container() {
-  local label_value=$1 out id
+  local label_value=$1 result_var=$2 out id
   if ! out=$(docker run -d --label "com.docker.compose.project.working_dir=$label_value" busybox sleep 3600 2>&1); then
     fail "docker fixture: failed to start labeled container for $label_value: $out"
   fi
   id=$(printf '%s\n' "$out" | tail -1)
   DOCKER_CLEANUP_CONTAINER_IDS+=("$id")
-  printf '%s\n' "$id"
+  printf -v "$result_var" '%s' "$id"
 }
 
 test_docker_stack_is_stopped_on_teardown() {
@@ -243,6 +260,10 @@ test_docker_stack_is_stopped_on_teardown() {
 
   ids=$(docker_stack_container_ids "$abs_wt")
   [ -z "$ids" ] || fail "docker-stack-core: container(s) for $abs_wt are still alive after teardown: $ids"
+  assert_absent "$case_dir/wt" \
+    "docker-stack-core: treehouse did not return the worktree after docker cleanup"
+  assert_grep "$case_dir/wt" "$case_dir/treehouse.log" \
+    "docker-stack-core: teardown never reached treehouse return"
   pass "teardown stops and removes the docker container(s) started by its own worktree"
 }
 
@@ -288,10 +309,12 @@ test_docker_absent_does_not_break_teardown() {
   path_no_docker=$(make_path_without_docker "$case_dir")
 
   set +e
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/home" \
+  FM_ROOT_OVERRIDE="$case_dir/firstmate-root" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_TEARDOWN_GUARD_DONE=1 \
+  FM_DOCKER_TREEHOUSE_LOG="$case_dir/treehouse.log" \
   PATH="$case_dir/fakebin:$path_no_docker" \
     "$TEARDOWN" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -329,6 +352,14 @@ SH
 test_no_docker_stack_present_completes_silently() {
   local id=docker-no-stack case_dir rc
   case_dir=$(make_case "$id")
+  cat > "$case_dir/fakebin/docker" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  info|ps) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/docker"
 
   set +e
   run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -369,12 +400,12 @@ SH
 # "worktree=" meta field must never let docker cleanup reach the captain's own
 # firstmate home/repo, even though every other check in this file already
 # passes (docker present, daemon reachable, real container to find).
-test_docker_stack_never_touches_firstmate_home_or_root() {
+test_docker_stack_never_touches_firstmate_root() {
   local id=docker-guard-root case_dir canon_root cid rc
   case_dir=$(make_case "$id")
-  canon_root=$(canon "$ROOT")
+  canon_root=$(canon "$case_dir/firstmate-root")
   corrupt_meta_worktree "$case_dir" "$id" "$canon_root"
-  cid=$(start_labeled_container "$canon_root")
+  start_labeled_container "$canon_root" cid
 
   set +e
   run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -386,7 +417,27 @@ test_docker_stack_never_touches_firstmate_home_or_root() {
     || fail "docker-guard-root: CRITICAL - a container labeled with the firstmate repo's own path was removed via a corrupted worktree field"
   assert_grep "firstmate repo itself" "$case_dir/stderr" \
     "docker-guard-root: teardown should visibly report refusing to treat the firstmate repo/home as a task worktree"
-  pass "a worktree field corrupted to point at the firstmate repo/home itself never reaches its docker containers"
+  pass "a worktree field corrupted to point at the firstmate repo itself never reaches its docker containers"
+}
+
+test_docker_stack_never_touches_firstmate_home() {
+  local id=docker-guard-home case_dir canon_home cid rc
+  case_dir=$(make_case "$id")
+  canon_home=$(canon "$case_dir/home")
+  corrupt_meta_worktree "$case_dir" "$id" "$canon_home"
+  start_labeled_container "$canon_home" cid
+
+  set +e
+  run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-guard-home: teardown should still succeed"
+
+  [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] \
+    || fail "docker-guard-home: CRITICAL - a container labeled with the active firstmate home's path was removed via a corrupted worktree field"
+  assert_grep "active firstmate home itself" "$case_dir/stderr" \
+    "docker-guard-home: teardown should visibly report refusing to treat the active firstmate home as a task worktree"
+  pass "a worktree field corrupted to point at the active firstmate home never reaches its docker containers"
 }
 
 # A worktree field pointing at a real, existing directory that simply is not
@@ -399,7 +450,7 @@ test_docker_stack_never_touches_unregistered_directory() {
   mkdir -p "$bogus_dir"
   canon_bogus=$(canon "$bogus_dir")
   corrupt_meta_worktree "$case_dir" "$id" "$bogus_dir"
-  cid=$(start_labeled_container "$canon_bogus")
+  start_labeled_container "$canon_bogus" cid
 
   set +e
   run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -414,11 +465,17 @@ test_docker_stack_never_touches_unregistered_directory() {
   pass "a worktree field pointing at a real but unregistered directory never reaches its docker containers"
 }
 
-test_docker_stack_is_stopped_on_teardown
-test_docker_stack_isolation_leaves_other_task_untouched
 test_docker_absent_does_not_break_teardown
 test_docker_daemon_unreachable_does_not_break_teardown
 test_no_docker_stack_present_completes_silently
 test_docker_enumeration_failure_is_reported_and_non_blocking
-test_docker_stack_never_touches_firstmate_home_or_root
-test_docker_stack_never_touches_unregistered_directory
+
+if [ "$REAL_DOCKER_AVAILABLE" = 1 ]; then
+  test_docker_stack_is_stopped_on_teardown
+  test_docker_stack_isolation_leaves_other_task_untouched
+  test_docker_stack_never_touches_firstmate_root
+  test_docker_stack_never_touches_firstmate_home
+  test_docker_stack_never_touches_unregistered_directory
+else
+  echo "skip: real docker unavailable; portable docker teardown cases passed"
+fi
