@@ -14,8 +14,24 @@
 # one automatic recovery request asking for a repost through the parent channel,
 # and escalate once if the recovery turn also completes without a correlated
 # report. Never loop, never repeatedly inject, never silently expire unresolved
-# records, and never treat wrong-home or structured-home heuristics as
-# acknowledgement.
+# records, and never treat a structured-home heuristic or a fuzzy wrong-home
+# signal as acknowledgement.
+#
+# Local own-home report mirroring: a LOCAL secondmate that answered a marked
+# request with the EXACT corr token in its own home instead of the parent status
+# channel is the one wrong-home case that still resolves, and it is NOT silent
+# acknowledgement. fm_pending_reply_mirror_local_report copies that exact
+# correlated line into the parent status channel first, so the answer is surfaced
+# to parent supervision exactly as the mate should have written it, and only then
+# resolves through the normal parent-status path. This is the local analog of the
+# remote reply mirror in bin/fm-procevent-remote-reply.sh, which already mirrors a
+# remote mate's correlated lines into the parent channel before resolving; a local
+# mate simply had no such mirror, so its own-home reposts wedged as escalations
+# nothing could close. An exact 16-hex corr match is proof, not a heuristic: the
+# token is embedded only in the request delivered to that mate, so a mate could
+# already self-resolve by writing it to the parent directly, and mirroring grants
+# no power the parent channel did not already trust. Only a delivered record is
+# mirrored, so the corr line is never evidence a request was actually delivered.
 #
 # Record location (parent FM_HOME):
 #   state/pending-replies/<corr_id>
@@ -55,6 +71,9 @@
 #   wrong_home_hits=        count of corr sightings under the secondmate home
 #   wrong_home_sightings=   comma-separated identities of counted sightings
 #   wrong_home_scan_signature=
+#   local_home_scan_signature=
+#                           bounds the local own-home mirror scan to a changed
+#                           secondmate status set (see the local mirror note above)
 #   grace_secs=             bounded grace before recovery is eligible
 #
 # Escalation lifecycle: an escalation is not just a message, it OPENS a durable
@@ -288,6 +307,7 @@ resolved_via=
 wrong_home_hits=0
 wrong_home_sightings=
 wrong_home_scan_signature=
+local_home_scan_signature=
 grace_secs=$(fm_pending_reply_grace_secs)
 EOF
   chmod 600 "$tmp" 2>/dev/null || true
@@ -1135,6 +1155,57 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
   return 0
 }
 
+# Mirror a LOCAL secondmate's own-home correlated report into the parent status
+# channel so it surfaces to parent supervision and then resolves through the
+# normal parent-status path (see the local mirror note in this file's header).
+# The local analog of the remote reply mirror (bin/fm-procevent-remote-reply.sh).
+# Prints nothing. Returns 0 when a correlated line was mirrored (or was already
+# present in the parent channel), 1 when there was nothing to mirror.
+# Only a delivered, non-resolved record is mirrored, and only the EXACT corr line
+# (fm_pending_reply_line_resolves, which also excludes the parent's own missed
+# escalation). At most once on exact bytes. A per-record scan signature bounds the
+# cost to a changed secondmate status set, exactly like detect_wrong_home.
+fm_pending_reply_mirror_local_report() {  # <state-dir> <corr_id> <secondmate-home>
+  local state=$1 corr=$2 sm_home=$3
+  local rec phase delivered parent_status snapshot previous status_file rc=1 line=''
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  [ -n "$sm_home" ] && [ -d "$sm_home" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  [ "$phase" != resolved ] || return 1
+  # A correlated line is proof of a REPLY, never of DELIVERY: only mirror once
+  # delivery is independently established, so this never manufactures delivery.
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  [ -n "$delivered" ] || return 1
+  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  [ -n "$parent_status" ] || return 1
+  snapshot=$(fm_pending_reply_status_set_signature "$sm_home/state")
+  previous=$(fm_pending_reply_get "$rec" local_home_scan_signature)
+  [ "$snapshot" != "$previous" ] || return 1
+  for status_file in "$sm_home"/state/*.status; do
+    [ -f "$status_file" ] || continue
+    # Never treat the parent channel itself as a foreign home.
+    [ "$status_file" != "$parent_status" ] || continue
+    line=$(fm_pending_reply_find_resolve_line "$status_file" "$corr")
+    [ -n "$line" ] || continue
+    if grep -Fqx -- "$line" "$parent_status" 2>/dev/null; then
+      rc=0
+      break
+    fi
+    mkdir -p "$(dirname "$parent_status")" 2>/dev/null || { rc=1; break; }
+    if printf '%s\n' "$line" >> "$parent_status" 2>/dev/null; then
+      rc=0
+    fi
+    break
+  done
+  # Record the scan signature only after a clean pass, so a write failure retries
+  # on the next tick instead of being suppressed as "already scanned".
+  if [ "$rc" -eq 0 ] || [ -z "$line" ]; then
+    fm_pending_reply_set "$rec" local_home_scan_signature "$snapshot" || return 1
+  fi
+  return "$rc"
+}
+
 # One reconciliation tick for a single record: resolve, observe, recover, escalate.
 # busy_state is busy|idle|unknown for the secondmate endpoint.
 # secondmate_home may be empty when unknown.
@@ -1152,6 +1223,11 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
       escalated) fm_pending_reply_try_resolve "$state" "$corr" >/dev/null 2>&1 || true ;;
     esac
     return 0
+  fi
+  # A local secondmate's own-home repost is mirrored into the parent channel
+  # before resolution so the answer surfaces and then resolves normally.
+  if [ -n "$sm_home" ]; then
+    fm_pending_reply_mirror_local_report "$state" "$corr" "$sm_home" >/dev/null 2>&1 || true
   fi
   # Correlated parent report always wins and is idempotent.
   if fm_pending_reply_try_resolve "$state" "$corr"; then
@@ -1247,14 +1323,18 @@ fm_pending_reply_tick() {  # <state-dir>
     esac
     meta="$state/${task_id}.meta"
     if [ "$phase" = escalated ]; then
+      sm_home=
+      [ -f "$meta" ] && sm_home=$(fm_meta_get "$meta" home)
+      # Mirror a local secondmate's own-home repost into the parent channel first,
+      # so an escalation whose only answer landed in the wrong home still resolves.
+      if [ -n "$sm_home" ]; then
+        fm_pending_reply_mirror_local_report "$state" "$corr" "$sm_home" >/dev/null 2>&1 || true
+      fi
       if fm_pending_reply_try_resolve "$state" "$corr"; then
         continue
       fi
-      if [ -f "$meta" ]; then
-        sm_home=$(fm_meta_get "$meta" home)
-        if [ -n "$sm_home" ]; then
-          fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" || true
-        fi
+      if [ -n "$sm_home" ]; then
+        fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" || true
       fi
       continue
     fi

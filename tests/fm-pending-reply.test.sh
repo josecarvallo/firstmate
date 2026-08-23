@@ -751,7 +751,102 @@ test_wrong_home_detected_not_acknowledged() {
   if fm_pending_reply_try_resolve "$state" "$corr"; then
     fail "wrong-home status must not resolve via parent path"
   fi
+  # Detection and try_resolve in isolation never resolve a wrong-home report; the
+  # tick-level local mirror is what surfaces it into the parent channel and then
+  # resolves it (test_local_own_home_report_is_mirrored_and_resolves).
   pass "wrong-home reports are detected but do not silently acknowledge"
+}
+
+test_local_own_home_report_is_mirrored_and_resolves() {
+  local home state sm_home corr rec status parent_line drain_corr dup
+  home=$(setup_parent local-mirror)
+  state="$home/state"
+  sm_home="$home/sm"
+  mkdir -p "$sm_home/state"
+  status="$state/amplifica.status"
+  export FM_PENDING_REPLY_NOW=8100
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  # A LOCAL secondmate: home set in meta, no remote_host.
+  fm_write_secondmate_meta "$state/amplifica.meta" "$sm_home" "sess:fm-amplifica"
+  # Backend stubs so the tick never probes a real endpoint.
+  # shellcheck disable=SC2329
+  fm_backend_busy_state() { printf 'idle'; }
+  # shellcheck disable=SC2329
+  fm_backend_capture() { printf 'idle footer'; }
+
+  # The incident shape: a delivered request escalated with no correlated parent
+  # report, because the mate answered in its OWN home instead of the parent.
+  corr=$(fm_pending_reply_create "$home" "$state" "amplifica" "reponer la lane LF")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase escalated
+  fm_pending_reply_set "$rec" escalated_epoch 8050
+  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=amplifica pending-reply-id=%s request=reponer la lane LF\n' \
+    "$corr" "$corr" > "$status"
+  # The mate's exact correlated repost, stranded in its own home.
+  printf 'done [corr=%s]: repost -- rama LF ya estaba arriba, cerrado\n' "$corr" \
+    > "$sm_home/state/amplifica.status"
+
+  # The watcher tick must mirror that answer into the parent channel and resolve.
+  fm_pending_reply_tick "$state" || fail "tick should succeed"
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "a local own-home repost must resolve, got $(phase_of "$state" "$corr")"
+  grep -Fq "corr=$corr" "$status" \
+    || fail "the mate's correlated answer must be mirrored into the parent channel"
+  parent_line=$(grep -F "corr=$corr" "$status" | grep -F 'repost -- rama LF' || true)
+  [ -n "$parent_line" ] \
+    || fail "the mirrored line must carry the mate's real answer, not a placeholder"
+  # The escalation decision must be closed, not left open forever.
+  [ -z "$(status_open_decisions "$status" | grep -F "pending-reply-$corr" || true)" ] \
+    || fail "mirroring must close the escalated decision"
+  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "escalation closure should be recorded"
+
+  # At most once on exact bytes: another tick must not duplicate the parent line.
+  fm_pending_reply_tick "$state" || fail "second tick should succeed"
+  dup=$(grep -Fc "repost -- rama LF ya estaba arriba, cerrado" "$status")
+  [ "$dup" = 1 ] || fail "mirror must be at most once on exact bytes, got $dup copies"
+
+  # Treadmill: a NEW expectation created mid-drain, answered again in the mate's
+  # own home, must also be mirrored and resolved by a later tick - draining is a
+  # standing mechanism, not a one-shot pass over a static batch.
+  export FM_PENDING_REPLY_NOW=8200
+  drain_corr=$(fm_pending_reply_create "$home" "$state" "amplifica" "segunda orden")
+  fm_pending_reply_mark_delivered "$state" "$drain_corr"
+  printf 'done [corr=%s]: segunda orden ejecutada\n' "$drain_corr" \
+    >> "$sm_home/state/amplifica.status"
+  fm_pending_reply_tick "$state" || fail "treadmill tick should succeed"
+  [ "$(phase_of "$state" "$drain_corr")" = resolved ] \
+    || fail "a repost created mid-drain must also resolve, got $(phase_of "$state" "$drain_corr")"
+  grep -Fq "corr=$drain_corr" "$status" \
+    || fail "the mid-drain answer must be mirrored into the parent channel"
+  pass "a local secondmate's own-home repost is mirrored to the parent and resolves"
+}
+
+test_local_mirror_requires_delivery() {
+  local home state sm_home corr rec before after
+  home=$(setup_parent local-mirror-undelivered)
+  state="$home/state"
+  sm_home="$home/sm"
+  mkdir -p "$sm_home/state"
+  export FM_PENDING_REPLY_NOW=8300
+  fm_write_secondmate_meta "$state/amplifica.meta" "$sm_home" "sess:fm-amplifica"
+  # Never delivered: an own-home corr line must not manufacture delivery.
+  corr=$(fm_pending_reply_create "$home" "$state" "amplifica" "not delivered yet")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  printf 'done [corr=%s]: arrived too early\n' "$corr" \
+    > "$sm_home/state/amplifica.status"
+  before=$(cat "$rec")
+  if fm_pending_reply_mirror_local_report "$state" "$corr" "$sm_home"; then
+    fail "an undelivered record must not be mirrored"
+  fi
+  after=$(cat "$rec")
+  [ "$after" = "$before" ] || fail "mirror must not mutate an undelivered record"
+  [ -z "$(fm_pending_reply_get "$rec" delivered_epoch)" ] \
+    || fail "mirror must never manufacture delivery"
+  [ ! -f "$state/amplifica.status" ] \
+    || fail "mirror must not write the parent channel for an undelivered record"
+  pass "local mirror requires established delivery"
 }
 
 test_unmarked_captain_input_creates_no_expectation() {
@@ -984,15 +1079,24 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     rec=$(fm_pending_reply_path "$state" "$open2")
     [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] \
       || fail "cached observation should update the second open record"
+    # The escalated record's only answer sits in its own home; the tick mirrors it
+    # into the parent channel and resolves it, so the escalated decision closes
+    # instead of accumulating wrong-home sightings forever.
     rec=$(fm_pending_reply_path "$state" "$escalated")
-    snapshot=$(fm_pending_reply_get "$rec" wrong_home_scan_signature)
-    [ -n "$snapshot" ] || fail "wrong-home scan should persist its file-set signature"
+    [ "$(phase_of "$state" "$escalated")" = resolved ] \
+      || fail "escalated own-home repost should mirror and resolve, got $(phase_of "$state" "$escalated")"
+    grep -Fq "corr=$escalated" "$state/escalated.status" \
+      || fail "the escalated record's answer should be mirrored into the parent channel"
+    snapshot=$(fm_pending_reply_get "$rec" local_home_scan_signature)
+    [ -n "$snapshot" ] || fail "local mirror scan should persist its file-set signature"
     fm_pending_reply_tick "$state"
     scans=$(wc -l < "$scan_log" | tr -d ' ')
-    [ "$scans" = 3 ] \
-      || fail "unchanged records should scan two open and one escalated status only once, got $scans"
-    [ "$(fm_pending_reply_get "$rec" wrong_home_scan_signature)" = "$snapshot" ] \
-      || fail "unchanged wrong-home logs should retain their scan signature"
+    # Two open records scan once each, and the escalated record scans its own home
+    # once (mirror) plus the parent once (resolve); a second tick re-scans nothing.
+    [ "$scans" = 4 ] \
+      || fail "unchanged records should not re-scan on a second tick, got $scans"
+    [ "$(fm_pending_reply_get "$rec" local_home_scan_signature)" = "$snapshot" ] \
+      || fail "unchanged own-home logs should retain their mirror scan signature"
   ) || fail "terminal-skip and observation-cache regression failed"
   pass "tick skips terminal records and reuses target observations"
 }
@@ -1200,6 +1304,8 @@ test_delivery_confirmation_fallback_reconciles
 test_unrelated_and_stale_corr_cannot_resolve
 test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
+test_local_own_home_report_is_mirrored_and_resolves
+test_local_mirror_requires_delivery
 test_unmarked_captain_input_creates_no_expectation
 test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
 test_document_pointer_resolves
