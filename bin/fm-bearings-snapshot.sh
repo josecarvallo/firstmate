@@ -167,10 +167,22 @@ done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
 
-# The deterministic return-catch-up owner must clear before this or any other
-# ordinary captain request proceeds. Bearings does not reproduce that policy;
-# it only consults the shared read-only gate.
-"$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
+# The deterministic return-catch-up owner gates ordinary captain work. Bearings is
+# a READ-ONLY report, so it uses the report-guard pass-through (captain direction
+# 2026-08-22, corr=e02e17b28f8446ad): it still refuses while away mode is active,
+# but proceeds while catch-up is pending AND surfaces the pending blockers
+# prominently below, so the report can triage the very blockers holding the gate.
+# Every mutating path keeps using the strict `guard` and stays blocked. Bearings
+# does not reproduce the gate policy; it only consults this shared read-only owner.
+CATCHUP_OUT=$("$SCRIPT_DIR/fm-afk-return.sh" report-guard) || exit $?
+if [ "${CATCHUP_OUT%%$'\n'*}" = pending ]; then
+  RETURN_CATCHUP=$(printf '%s\n' "$CATCHUP_OUT" \
+    | awk -F'\t' 'NR>1 && $1=="blocker" {printf "%s\t%s\t%s\n", $2, $3, $4}' \
+    | jq -R -s -c '{pending:true, blockers:(split("\n")|map(select(length>0))|map(split("\t"))|map({id:.[0], key:.[1], summary:.[2]}))}') \
+    || { echo "fm-bearings-snapshot: return catch-up projection failed" >&2; exit 1; }
+else
+  RETURN_CATCHUP='{"pending":false,"blockers":[]}'
+fi
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
@@ -499,6 +511,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }
+
+# Prepend the return catch-up as the FIRST model fields so a pending gate is the
+# most prominent thing in either output form (captain direction 2026-08-22): the
+# read-only report proceeds, but never hides the blockers still holding the gate.
+MODEL=$(printf '%s' "$MODEL" | jq --argjson rc "$RETURN_CATCHUP" \
+  '{return_catchup_pending: $rc.pending, return_catchup: $rc.blockers} + .') \
+  || { echo "fm-bearings-snapshot: return catch-up projection failed" >&2; exit 1; }
 
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"

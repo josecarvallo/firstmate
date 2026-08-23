@@ -945,6 +945,50 @@ test_open_decision_surfaces_end_to_end() {
   pass "an authoritative captain hold surfaces end-to-end"
 }
 
+# The read-only report proceeds through a pending return catch-up (captain
+# direction 2026-08-22, corr=e02e17b28f8446ad) and surfaces the pending blockers
+# PROMINENTLY, so the very report a returning captain uses to triage them is not
+# deadlocked behind their resolution. Away mode still ACTIVE refuses outright,
+# and every mutating path keeps using the strict guard.
+test_return_catchup_surfaces_prominently_and_report_proceeds() {
+  local home fakebin json toon rc
+  home=$(make_home return-catchup); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  # Clear gate: pending is false and no blockers are surfaced.
+  json=$(run "$home" "$fakebin" --json) || fail "clear-gate report should proceed"
+  printf '%s' "$json" | jq -e '.return_catchup_pending == false and (.return_catchup == [])' \
+    >/dev/null || fail "a clear gate must report return_catchup_pending false: $json"
+
+  # A pending return catch-up must NOT refuse the read-only report.
+  printf 'schema\tfm-afk-return.v1\nphase\tblocked\nblocker\trepair-task\tsynthetic-dependency\tfirstmate can refresh the token\n' \
+    > "$home/state/.afk-return-catchup"
+  json=$(run "$home" "$fakebin" --json) \
+    || fail "a read-only report must proceed while catch-up is pending"
+  printf '%s' "$json" | jq -e '
+    .return_catchup_pending == true
+    and (.return_catchup | any(.[]; .id == "repair-task" and .key == "synthetic-dependency"))
+  ' >/dev/null || fail "the pending blockers must be surfaced in the report: $json"
+
+  # Prominence: the catch-up fields are the FIRST thing in the TOON report.
+  toon=$(run "$home" "$fakebin") || fail "TOON report must proceed while catch-up is pending"
+  case "$(printf '%s\n' "$toon" | head -1)" in
+    'return_catchup_pending: true') : ;;
+    *) fail "pending catch-up must be the first line of the report: $(printf '%s\n' "$toon" | head -1)" ;;
+  esac
+  printf '%s\n' "$toon" | grep -Fq 'repair-task,synthetic-dependency' \
+    || fail "the pending blocker must be listed prominently in the TOON report"
+
+  # Away mode still active refuses outright: not a return scenario.
+  date +%s > "$home/state/.afk"
+  set +e
+  run "$home" "$fakebin" --json >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the report must still refuse while away mode is active"
+  pass "read-only report proceeds through a pending catch-up and surfaces blockers prominently"
+}
+
 test_report_pointers_surface() {
   local home fakebin json
   home=$(make_home reports); write_fixture "$home"
@@ -1972,6 +2016,7 @@ test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
+test_return_catchup_surfaces_prominently_and_report_proceeds
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
 test_include_prs_is_the_only_fetch_path

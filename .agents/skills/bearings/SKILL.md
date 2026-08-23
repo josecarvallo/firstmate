@@ -108,6 +108,8 @@ Only the exact answer value `merge` authorizes a merge; an answer carrying a fre
 ## Chat-response contract
 
 This skill is the one owner of the `/bearings` chat-response format; the snapshot and classifier own the data that feeds it, and no other file restates this contract.
+When the snapshot reports `return_catchup_pending: true`, render a prominent "Return catch-up pending" banner ABOVE the four sections, listing every blocker from the snapshot's `return_catchup` rows (id, key, reason).
+The read-only report proceeds through the away-mode return gate by design (captain direction 2026-08-22), but the banner is mandatory so it never hides what still gates ordinary and mutating work; a report that omitted it would make the gate cosmetic.
 Every `/bearings` chat response renders EXACTLY these four sections, in THIS order, and nothing else structural (there is no At Anchor section):
 
 1. **Captain's Call** - ONLY items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.

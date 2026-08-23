@@ -79,7 +79,7 @@ EOF
   printf 'blocked [key=%s]: firstmate can refresh the synthetic token\n' "$key" > "$dir/home/state/repair-task.status"
 }
 
-test_return_gate_orders_catchup_before_bearings() {
+test_return_gate_gates_mutation_passes_readonly_report_and_clears() {
   local dir out rc gate wake_count
   dir="$TMP_ROOT/ordering"
   install_runner "$dir"
@@ -109,14 +109,28 @@ test_return_gate_orders_catchup_before_bearings() {
   [ -s "$dir/home/state/.fake-drain" ] || fail "blocked return acknowledged its emitted wake before handling completed"
   [ ! -e "$dir/home/state/.fake-drain-acks" ] || fail "blocked return crossed the post-handling acknowledgement boundary"
 
-  # The exact incident regression: Bearings is an ordinary request and must
-  # refuse before reading/rendering while this shared gate remains open.
+  # A MUTATING path stays blocked behind the strict guard while the gate is open.
   set +e
-  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1)
+  out=$(run_return "$dir" guard)
   rc=$?
   set -e
-  [ "$rc" -eq 3 ] || fail "Bearings should refuse behind the return gate (rc=$rc): $out"
-  assert_contains "$out" 'return catch-up is pending' "Bearings refusal did not point to the shared return owner"
+  [ "$rc" -eq 3 ] || fail "the strict guard must keep mutating work blocked behind the gate (rc=$rc): $out"
+  assert_contains "$out" 'return catch-up is pending' "strict guard refusal did not point to the shared return owner"
+
+  # A READ-ONLY report passes THROUGH the gate (captain direction 2026-08-22) and
+  # is handed the pending blocker so it can surface it prominently. Only the
+  # read-only pass-through is exempt; the mutating guard above stays blocked.
+  set +e
+  out=$(run_return "$dir" report-guard)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the read-only report-guard must let a report proceed while catch-up is pending (rc=$rc): $out"
+  case "$(printf '%s\n' "$out" | head -1)" in
+    pending) : ;;
+    *) fail "report-guard must announce the pending catch-up: $out" ;;
+  esac
+  assert_contains "$out" "blocker"$'\t'"repair-task"$'\t'"synthetic-dependency" \
+    "report-guard must surface the pending blocker so the report can render it"
 
   # Restart/re-entry is idempotent: no second stop, no duplicate catch-up line,
   # and the same unresolved blocker remains authoritative.
@@ -147,7 +161,7 @@ test_return_gate_orders_catchup_before_bearings() {
 
   out=$(run_return "$dir" check) || fail "an already-clear repeated check should be idempotent: $out"
   [ ! -e "$gate" ] || fail "idempotent clear check recreated a gate"
-  pass "return catch-up precedes Bearings, owns live blocker remediation, preserves evidence once, and clears idempotently"
+  pass "return catch-up gates mutating work, lets a read-only report pass while surfacing the blocker, owns live blocker remediation, preserves evidence once, and clears idempotently"
 }
 
 test_explicit_reclassification_requires_durable_reason() {
@@ -275,7 +289,7 @@ test_check_retries_recorded_terminal_teardown() {
   pass "check retries recorded terminal teardown and keeps catch-up gated until success"
 }
 
-test_return_gate_orders_catchup_before_bearings
+test_return_gate_gates_mutation_passes_readonly_report_and_clears
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain

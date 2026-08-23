@@ -6,6 +6,12 @@
 #   fm-afk-return.sh begin    Same as the default command.
 #   fm-afk-return.sh check    Re-present and close the gate only after blockers resolve.
 #   fm-afk-return.sh guard    Read-only refusal while away or catch-up is pending.
+#   fm-afk-return.sh report-guard
+#                             Read-only pass-through for a NON-MUTATING status
+#                             report: refuses only while away mode is still active,
+#                             but LETS a read-only report proceed while catch-up is
+#                             pending, printing the pending blockers so the report
+#                             can surface them prominently. See the read-only note.
 #
 # `blocked:` is the crewmate protocol's firstmate-actionable verb. A live task's
 # open blocked event must be remediated and closed with `resolved [key=...]`, or
@@ -19,7 +25,23 @@
 # It retains the presented wake, buffered-escalation, and wedge-marker evidence
 # until every live open blocker is closed and `check` succeeds. Repeated begin/check
 # calls are idempotent. `guard` never mutates state and is suitable for ordinary
-# read entrypoints such as fm-bearings-snapshot.sh.
+# read entrypoints; every MUTATING path stays behind it with no exception.
+#
+# Read-only report pass-through (captain direction 2026-08-22, corr=e02e17b28f8446ad):
+# a read-only status report is the very surface a returning captain needs to TRIAGE
+# the pending blockers, so gating it behind their resolution is a deadlock - the
+# report cannot help clear the gate it is blocked by. `report-guard` therefore lets
+# a NON-MUTATING report proceed while catch-up is pending, on three conditions that
+# are the whole point of the exception:
+#   1. Only the read-only report passes; every mutating path keeps using `guard`
+#      (or the begin/check gate) and stays blocked without exception.
+#   2. A report that passes MUST surface the pending blockers prominently; this
+#      command prints them (`pending` marker plus the durable blocker records) so
+#      the caller can render them, and hiding them would make the gate cosmetic.
+#   3. The catch-up requirement itself is untouched: the gate still opens, still
+#      requires begin/check, and still blocks ordinary mutating work as before.
+# report-guard still refuses outright while away mode is ACTIVE (state/.afk), which
+# is not a return scenario.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -140,6 +162,26 @@ return_guard() {
   return 0
 }
 
+# Read-only pass-through for a NON-MUTATING status report (see the header note).
+# Refuses only while away mode is ACTIVE. While catch-up is pending it prints a
+# `pending` marker followed by the durable blocker records and returns 0, so the
+# caller can proceed AND surface the pending blockers prominently. Prints `clear`
+# and returns 0 when nothing is pending. Never mutates state; like `guard` it does
+# not source fm-wake-lib.sh, so it stays a literal read-only entrypoint.
+report_guard() {
+  if [ -e "$STATE/.afk" ]; then
+    printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
+    return 3
+  fi
+  if [ -e "$GATE" ]; then
+    printf 'pending\n'
+    grep '^blocker'$'\t' "$GATE" 2>/dev/null || true
+    return 0
+  fi
+  printf 'clear\n'
+  return 0
+}
+
 return_reconcile() {
   local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
@@ -216,6 +258,7 @@ main() {
   case "$mode" in
     begin|check) ;;
     guard) return_guard; return ;;
+    report-guard) report_guard; return ;;
     -h|--help|help) usage; return 0 ;;
     *) usage >&2; return 2 ;;
   esac
