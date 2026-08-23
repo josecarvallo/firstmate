@@ -158,6 +158,10 @@ run_teardown() {
   FM_FAKE_DOCKER_STATE="$case_dir/docker.state" \
   FM_FAKE_DOCKER_STOP_FAIL_ID="${FM_FAKE_DOCKER_STOP_FAIL_ID:-}" \
   FM_FAKE_DOCKER_RM_FAIL_ID="${FM_FAKE_DOCKER_RM_FAIL_ID:-}" \
+  FM_FAKE_DOCKER_HANG_COMMAND="${FM_FAKE_DOCKER_HANG_COMMAND:-}" \
+  FM_FAKE_DOCKER_HANG_SECS="${FM_FAKE_DOCKER_HANG_SECS:-3}" \
+  FM_TEARDOWN_DOCKER_TIMEOUT_SECS="${FM_TEARDOWN_DOCKER_TIMEOUT_SECS:-10}" \
+  FM_TIMEOUT_MECHANISM_OVERRIDE="${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" "$id" "$@"
 }
@@ -169,6 +173,12 @@ install_stateful_docker() {
 #!/usr/bin/env bash
 set -u
 state=${FM_FAKE_DOCKER_STATE:?}
+command=${1:-}
+if [ "${FM_FAKE_DOCKER_HANG_COMMAND:-}" = "$command" ]; then
+  sleep "${FM_FAKE_DOCKER_HANG_SECS:-3}"
+  : > "${state}.${command}.completed"
+  exit 1
+fi
 case "${1:-}" in
   info)
     exit 0
@@ -451,6 +461,32 @@ test_docker_removal_failure_is_reported_and_non_blocking() {
   pass "a failed docker removal is visible and does not block teardown"
 }
 
+test_docker_commands_are_bounded() {
+  local command id case_dir abs_wt rc
+  for command in info ps stop rm; do
+    id="docker-timeout-$command"
+    case_dir=$(make_case "$id")
+    abs_wt=$(canon "$case_dir/wt")
+    install_stateful_docker "$case_dir"
+    seed_fake_docker_container "$case_dir" "timeout-$command" "$abs_wt"
+
+    set +e
+    FM_FAKE_DOCKER_HANG_COMMAND="$command" \
+    FM_FAKE_DOCKER_HANG_SECS=3 \
+    FM_TEARDOWN_DOCKER_TIMEOUT_SECS=1 \
+    FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+      run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "docker-timeout-$command: a hung docker command should not block teardown"
+    assert_absent "$case_dir/docker.state.$command.completed" \
+      "docker-timeout-$command: docker command outlived its hard deadline"
+    assert_present "$case_dir/treehouse.log" \
+      "docker-timeout-$command: teardown did not continue to worktree return"
+  done
+  pass "hung docker commands are bounded and never block teardown"
+}
+
 test_docker_absent_does_not_break_teardown() {
   local id=docker-absent case_dir path_no_docker rc
   case_dir=$(make_case "$id")
@@ -616,6 +652,7 @@ test_docker_stack_never_touches_unregistered_directory() {
 test_portable_docker_stack_is_stopped_on_teardown
 test_portable_docker_stack_isolation
 test_docker_removal_failure_is_reported_and_non_blocking
+test_docker_commands_are_bounded
 test_docker_absent_does_not_break_teardown
 test_docker_daemon_unreachable_does_not_break_teardown
 test_no_docker_stack_present_completes_silently

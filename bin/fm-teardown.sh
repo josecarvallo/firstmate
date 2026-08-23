@@ -161,6 +161,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+TEARDOWN_DOCKER_TIMEOUT_SECS=${FM_TEARDOWN_DOCKER_TIMEOUT_SECS:-10}
+case "$TEARDOWN_DOCKER_TIMEOUT_SECS" in
+  ''|*[!0-9]*|0) TEARDOWN_DOCKER_TIMEOUT_SECS=10 ;;
+esac
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
@@ -1559,7 +1563,7 @@ teardown_task_docker_stack() {  # <worktree-dir> <project>
   local dir=$1 project=$2 abs_dir abs_home abs_root ids id count failed_ids=
   [ -n "$dir" ] || return 0
   command -v docker >/dev/null 2>&1 || return 0
-  docker info >/dev/null 2>&1 || return 0
+  fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker info >/dev/null 2>&1 || return 0
   abs_dir=$(canonical_existing_dir "$dir") || return 0
   abs_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || abs_home=
   if [ -n "$abs_home" ] && { [ "$abs_home" = "$abs_dir" ] || path_is_ancestor_of "$abs_home" "$abs_dir"; }; then
@@ -1575,7 +1579,8 @@ teardown_task_docker_stack() {  # <worktree-dir> <project>
     echo "warning: cannot verify $abs_dir is task $ID's own registered worktree of ${project:-<no project recorded>}; leaving any docker stack in place for manual inspection" >&2
     return 0
   fi
-  if ! ids=$(docker ps -aq --filter "label=com.docker.compose.project.working_dir=$abs_dir" 2>&1); then
+  if ! ids=$(fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker ps -aq \
+      --filter "label=com.docker.compose.project.working_dir=$abs_dir" 2>&1); then
     echo "warning: cannot enumerate docker containers for task $ID's worktree $abs_dir ($ids); leaving any docker stack in place for manual inspection" >&2
     return 0
   fi
@@ -1584,8 +1589,8 @@ teardown_task_docker_stack() {  # <worktree-dir> <project>
   echo "teardown: stopping $count docker container(s) started by task $ID's own worktree ($abs_dir)" >&2
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    docker stop "$id" >/dev/null 2>&1 || true
-    if ! docker rm -f "$id" >/dev/null 2>&1; then
+    fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker stop "$id" >/dev/null 2>&1 || true
+    if ! fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker rm -f "$id" >/dev/null 2>&1; then
       failed_ids="${failed_ids}${failed_ids:+ }$id"
     fi
   done <<EOF
