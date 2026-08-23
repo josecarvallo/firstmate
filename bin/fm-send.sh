@@ -66,12 +66,30 @@
 # confirmed, fm-send itself appends the closing
 # "resolved [key=<key>]: answered: <capped excerpt>" line to that status file,
 # so the captain-facing OPEN DECISIONS record closes at answer time and never
-# depends on the busy worker writing a matching resolved line. The close is a
-# LOCAL append for every target kind - crewmate, scout, local secondmate, and
-# remote secondmate alike - because the open-decision ledger fm-wake-drain
-# folds lives in this home's own state dir (a remote mate's escalations reach
-# it through the parent-replies ingest); only the answer message crosses the
-# backend or remote transport.
+# depends on the busy worker writing a matching resolved line. The close reaches
+# every LIVE COPY of the answered key, never only the first one found.
+#
+# For a crewmate, scout, or secondmate target that is this home's own direct
+# report, that copy is a local append in this home's state dir, because the
+# open-decision ledger fm-wake-drain folds lives there; only the answer message
+# crosses the backend or remote transport.
+#
+# When THIS home is itself a secondmate, one more copy can be live. The mate
+# relays a worker's decision onto its parent escalation channel (the parent's own
+# state/<mate>.status, or the mirrored parent-replies.status on a remote route -
+# bin/fm-parent-channel-lib.sh owns the resolution), so the same key exists in two
+# logs that know nothing about each other. Answering the WORKER used to close only
+# the worker's copy, leaving the parent's fold showing an answered, already
+# executed decision as open forever - the one surface the captain reads to know
+# what still waits on them. So a key open in the parent channel is closed there
+# too, in the same confirmed-delivery step, with an at-most-once append (the
+# parent's log is not this home's bookkeeping: the append must wake the parent,
+# and a replay must not stack duplicates). The invariant is that a decision closes
+# in the channel where it opened; when this home is a secondmate whose parent
+# channel cannot be resolved, --resolve-key refuses BEFORE sending rather than
+# closing one copy and stranding the other in silence. A key in a reserved
+# namespace (bin/fm-classify-lib.sh) is never propagated, because its owning
+# library is the only writer that may open or close it.
 #
 # Chat is also a channel that carries keyed captain answers, so the same flag
 # feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
@@ -83,11 +101,12 @@
 # transferred from the live status log to its durable captain-held task, which
 # the status ledger alone can no longer close.
 #
-# Each named key must therefore currently be open in ONE of the two ledgers: open
-# in this home's status log per status_open_decisions (bin/fm-classify-lib.sh), or
-# a still-open captain-held task resolved as above. A key in neither is refused
-# before sending, so a mistyped key cannot deliver an answer while silently
-# orphaning the decision. A failed or unconfirmed send never closes a key (a remote
+# Each named key must therefore currently be open in at least ONE ledger: this
+# home's status log per status_open_decisions (bin/fm-classify-lib.sh), this
+# home's parent escalation channel when it has one, or a still-open captain-held
+# task resolved as above. A key in none of them is refused before sending, so a
+# mistyped key cannot deliver an answer while silently orphaning the decision.
+# A failed or unconfirmed send never closes a key (a remote
 # delivered-with-pending-confirmation outcome counts as delivered - see the
 # remote paragraph above); a
 # delivered answer whose closing append fails exits nonzero with the exact
@@ -143,6 +162,8 @@ fi
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -396,6 +417,11 @@ RESOLVE_STATUS_FILE=
 # longer owns also keeps the common path free of any backlog read.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
+# Keys this home ALSO opened in its parent escalation channel. A secondmate's
+# escalation and its close must land in the same channel; see the parent-channel
+# paragraph in this script's header.
+RESOLVE_PARENT_KEYS=
+RESOLVE_PARENT_CHANNEL=
 
 # Resolve a --resolve-key key that the status log no longer owns to the
 # captain-held task that carries it: the key as a task id itself (the collapsed
@@ -434,21 +460,53 @@ if [ -n "$RESOLVE_KEYS" ]; then
   RESOLVE_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
   RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
   resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  # Resolve this home's parent escalation channel BEFORE anything is sent, so an
+  # identified secondmate home whose parent binding cannot be read refuses here
+  # instead of closing only its local copy and stranding the upstream one.
+  resolve_parent_rc=0
+  RESOLVE_PARENT_CHANNEL=$(fm_parent_channel_path "$FM_HOME" "$STATE") || resolve_parent_rc=$?
+  if [ "$resolve_parent_rc" -eq 2 ]; then
+    echo "error: --resolve-key: this is a secondmate home, but its parent escalation channel cannot be resolved from .fm-secondmate-home and .fm-secondmate-parent. A decision must close in the channel where it opened, so closing only the local copy could strand the upstream one; nothing was sent. Repair the parent binding, then resend." >&2
+    exit 1
+  fi
+  [ "$resolve_parent_rc" -eq 0 ] || RESOLVE_PARENT_CHANNEL=
+  resolve_parent_open_set=
+  [ -z "$RESOLVE_PARENT_CHANNEL" ] \
+    || resolve_parent_open_set=$(status_open_decisions "$RESOLVE_PARENT_CHANNEL")
   for k in $RESOLVE_KEYS; do
+    resolve_key_owned=0
     case "$resolve_open_set" in
       "$k"$'\t'*|*$'\n'"$k"$'\t'*)
         RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
-        continue
+        resolve_key_owned=1
         ;;
     esac
-    # Not open in the status log. A decision already transferred to its durable
+    # The same key can live in more than one copy: the worker raised it locally
+    # AND this home relayed it upstream. The field failure was closing one copy
+    # while the other stayed open forever, so collect every live copy rather
+    # than stopping at the first.
+    case "$resolve_parent_open_set" in
+      "$k"$'\t'*|*$'\n'"$k"$'\t'*)
+        # A reserved namespace has exactly one owning library, which is the only
+        # thing that may open or close it. Leave that copy entirely alone rather
+        # than propagating a foreign close into it. "answered:" is the exact note
+        # prefix the close below writes, so this asks the owning rule the same
+        # question the fold will ask of the real line.
+        if fm_classify_decision_key_transition_allowed "$k" "answered:"; then
+          RESOLVE_PARENT_KEYS="${RESOLVE_PARENT_KEYS}${RESOLVE_PARENT_KEYS:+ }$k"
+          resolve_key_owned=1
+        fi
+        ;;
+    esac
+    [ "$resolve_key_owned" -eq 0 ] || continue
+    # Open in neither status copy. A decision already transferred to its durable
     # captain-held task is exactly this case, and it is answerable - just
     # through the other ledger - so check there before refusing.
     if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
     fi
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE${RESOLVE_PARENT_CHANNEL:+ or $RESOLVE_PARENT_CHANNEL}, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
 fi
@@ -470,6 +528,20 @@ fm_send_close_resolved_keys() {  # <answer-text>
     fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "$FM_LINE_CAP_LINE" || append_rc=$?
     if [ "$append_rc" -eq 2 ]; then
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
+      return 1
+    fi
+  done
+  # Every live copy of an answered key, not just the local one. When this home is
+  # a secondmate that relayed the decision upstream, the copy the PARENT's fold
+  # reads lives in the parent's own log, and closing only the local copy is what
+  # left answered decisions open there forever. The append is plain and
+  # at-most-once: it must wake the parent (it is the parent's own log, not this
+  # home's bookkeeping), and a replay must not stack duplicates.
+  for k in $RESOLVE_PARENT_KEYS; do
+    line="resolved [key=$k]: answered: $note"
+    fm_cap_line_var "$line"
+    if ! fm_parent_channel_append_once "$RESOLVE_PARENT_CHANNEL" "$FM_LINE_CAP_LINE"; then
+      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in the parent escalation channel $RESOLVE_PARENT_CHANNEL, where this home opened it. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_PARENT_CHANNEL - do not resend the answer." >&2
       return 1
     fi
   done

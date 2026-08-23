@@ -386,6 +386,13 @@ EOF
 # writer-side rejection would.
 FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT='pending-reply-'
 
+# Public name for the reserved-namespace predicate below, for the writers that
+# must decide whether a line of theirs may claim a key at all. Consumers fold
+# through _fm_decision_fold_line and never need it.
+fm_classify_decision_key_transition_allowed() {  # <key> <note>
+  _fm_decision_key_transition_allowed "$1" "$2"
+}
+
 # 0 when <key> is not reserved, or is reserved and <note> speaks its vocabulary.
 _fm_decision_key_transition_allowed() {  # <key> <note>
   local key=$1 note=$2 prefix
