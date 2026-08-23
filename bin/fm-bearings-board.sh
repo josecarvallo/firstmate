@@ -12,8 +12,9 @@
 #   fm-bearings-board.sh path
 #
 # build      Validate the payload and inject it into a fresh copy of the shipped
-#            template at the stable board path. Establish or resume the Lavish
-#            session on that board BEFORE binding and arming its answer source,
+#            template at the stable board path only after the strict away-return
+#            guard passes. Establish or resume the Lavish session on that board
+#            BEFORE binding and arming its answer source,
 #            so a registered poll can never race a session that does not exist.
 #            Bind to the keyed-answer intake (bin/fm-captain-hold.sh) ALWAYS
 #            precedes arm, so the board can never produce an answer that has
@@ -135,6 +136,7 @@ validate_payload() {  # <data.json>
 command_build() {
   local data=${1-} board json tmp sid extracted
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  "$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
   jq empty "$data" 2>/dev/null || fail "board data is not valid JSON: $data"

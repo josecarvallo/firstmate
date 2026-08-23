@@ -190,6 +190,35 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   pass "build refuses malformed payloads before touching the board"
 }
 
+test_build_obeys_the_strict_away_return_guard() {
+  local home data board out rc
+  home=$(make_home return-guard)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+
+  printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$home/state/.afk-return-catchup"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -eq 3 ] || fail "build should refuse a pending return catch-up (rc=$rc): $out"
+  assert_contains "$out" 'return catch-up is pending' "pending catch-up refusal was not surfaced"
+  assert_absent "$board" "pending catch-up still produced a board"
+  [ ! -d "$home/state/procevent" ] || fail "pending catch-up still armed a board source"
+
+  rm -f "$home/state/.afk-return-catchup"
+  date +%s > "$home/state/.afk"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -eq 3 ] || fail "build should refuse active away mode (rc=$rc): $out"
+  assert_contains "$out" 'away mode is still active' "active away-mode refusal was not surfaced"
+  assert_absent "$board" "active away mode still produced a board"
+  [ ! -d "$home/state/procevent" ] || fail "active away mode still armed a board source"
+
+  rm -f "$home/state/.afk"
+  out=$(run_board "$home" build "$data") || fail "clear return state should allow board build: $out"
+  assert_present "$board" "clear return state did not produce a board"
+  assert_contains "$out" 'armed: ' "clear return state did not arm the board source"
+  pass "board build mutates only after the strict away-return guard passes"
+}
+
 test_build_injects_binds_then_arms() {
   local home data board out sid
   home=$(make_home build)
@@ -372,6 +401,7 @@ test_build_refuses_a_template_without_exactly_one_slot() {
 
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
+test_build_obeys_the_strict_away_return_guard
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails

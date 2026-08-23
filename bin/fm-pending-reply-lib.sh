@@ -168,14 +168,13 @@ fm_pending_reply_extract_corr() {  # <text>
   printf '%s' "$text" | grep -oE "$FM_PENDING_REPLY_CORR_RE" 2>/dev/null | head -1 | cut -d= -f2- | tr 'A-F' 'a-f' || true
 }
 
-# 0 if <text> carries the exact correlation token for <corr_id>.
+# 0 if <text> carries a standalone exact correlation token for <corr_id>.
 fm_pending_reply_text_has_corr() {  # <text> <corr_id>
-  local text=$1 corr=$2 token
-  token=$(fm_pending_reply_corr_token "$corr")
-  case "$text" in
-    *"$token"*) return 0 ;;
-  esac
-  return 1
+  local text=$1 corr=$2
+  [ "${#corr}" -eq 16 ] || return 1
+  case "$corr" in *[!0-9a-f]*) return 1 ;; esac
+  printf '%s\n' "$text" \
+    | LC_ALL=C grep -Eq "(^|[^[:alnum:]])corr=${corr}([^[:xdigit:]]|$)"
 }
 
 # Sanitize a short request summary: single line, bounded, no control chars.

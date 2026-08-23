@@ -25,6 +25,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
 - Plain `/bearings` gathers a fresh bounded snapshot and renders the four-section chat digest without creating, deleting, reading, or replacing `data/status-report-<YYYY-MM-DD>.md`.
 - `/bearings file` gathers a fresh bounded snapshot, replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch, and renders the four-section chat digest with a link or path to that report.
 - `/bearings lavish` gathers a fresh bounded snapshot, rebuilds and arms the interactive fleet board (the "Lavish board mode" section below), and renders the four-section chat digest with the board's URL inside it.
+- Before file or lavish mode mutates anything, require `bin/fm-afk-return.sh guard` to pass; if it refuses, surface its diagnostic and leave the report file or board build untouched.
 - Treat `file` and `lavish` only as explicit invocation options in the slash command.
 - Do not treat natural-language requests such as "write a report", "save this", "persist it", "make a file", or "make a board" as file or lavish mode unless the invocation explicitly includes the standalone option.
 - When the captain asks to include PRs, pass the snapshot command's live-PR opt-in.
@@ -54,7 +55,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
    The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.
    Plain mode stops here and writes no report artifact.
 
-3. **In explicit file mode only, compose and replace the detailed report file.**
+3. **In explicit file mode only, compose and replace the detailed report file after the invocation-mode strict guard passes.**
    The report uses the same four complete sections as the chat, in the same order, and adds the detail the chat omits.
    Never read an earlier `data/status-report-*.md` to decide what to omit, include, describe as changed, or call current.
    Write the full report to `data/status-report-<YYYY-MM-DD>.md` using today's date.
@@ -83,7 +84,7 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - When the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it), set the card's `close: "release"` so the answer lifts the hold instead of closing the task; question-shaped items omit it.
 - Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
 
-Run `build` once after composing the payload.
+After the invocation-mode strict guard passes, run `build` once after composing the payload; the build command repeats that guard at its mutation boundary.
 Its serve-first sequence publishes the board, establishes or resumes its Lavish session with `lavish-axi`, and only then binds and arms the polling source; use the session URL it prints in the chat digest.
 Never bind or arm the board before that session exists.
 Never run `lavish-axi poll` for the board yourself: the armed source's supervised runner owns the blocking poll, and the watcher's ordinary reconcile restarts it, so no conversational turn ever blocks on the board.
@@ -109,7 +110,7 @@ Only the exact answer value `merge` authorizes a merge; an answer carrying a fre
 
 This skill is the one owner of the `/bearings` chat-response format; the snapshot and classifier own the data that feeds it, and no other file restates this contract.
 When the snapshot reports `return_catchup_pending: true`, render a prominent "Return catch-up pending" banner ABOVE the four sections, listing every `return_catchup` row: blocker rows by id, key, and reason, and lifecycle rows by reason.
-The read-only report proceeds through the away-mode return gate by design (captain direction 2026-08-22), but the banner is mandatory so it never hides what still gates ordinary and mutating work; a report that omitted it would make the gate cosmetic.
+The plain chat report proceeds through the away-mode return gate by design (captain direction 2026-08-22), but the banner is mandatory so it never hides what still gates ordinary and mutating work; a report that omitted it would make the gate cosmetic.
 Every `/bearings` chat response renders EXACTLY these four sections, in THIS order, and nothing else structural (there is no At Anchor section):
 
 1. **Captain's Call** - ONLY items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.

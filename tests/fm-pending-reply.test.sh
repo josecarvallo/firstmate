@@ -686,6 +686,14 @@ test_unrelated_and_stale_corr_cannot_resolve() {
   if fm_pending_reply_try_resolve "$state" "$corr"; then
     fail "status without corr must not resolve"
   fi
+  printf 'done oldcorr=%s: prefixed substring\n' "$corr" >> "$state/hibit.status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "prefixed corr substring must not resolve"
+  fi
+  printf 'done [corr=%s0]: overlong hex value\n' "$corr" >> "$state/hibit.status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "overlong corr value must not resolve"
+  fi
   [ "$(phase_of "$state" "$corr")" = awaiting_report ] || fail "phase must stay awaiting_report"
   pass "unrelated events and stale correlation ids cannot resolve"
 }
@@ -847,6 +855,43 @@ test_local_mirror_requires_delivery() {
   [ ! -f "$state/amplifica.status" ] \
     || fail "mirror must not write the parent channel for an undelivered record"
   pass "local mirror requires established delivery"
+}
+
+test_local_mirror_requires_a_standalone_exact_corr_token() {
+  local home state sm_home corr rec status before
+  home=$(setup_parent local-mirror-exact-corr)
+  state="$home/state"
+  sm_home="$home/sm"
+  mkdir -p "$sm_home/state"
+  export FM_PENDING_REPLY_NOW=8325
+  fm_write_secondmate_meta "$state/amplifica.meta" "$sm_home" "sess:fm-amplifica"
+  corr=$(fm_pending_reply_create "$home" "$state" "amplifica" "exact token proof")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase escalated
+  fm_pending_reply_set "$rec" escalated_epoch 8300
+  status="$state/amplifica.status"
+  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=amplifica pending-reply-id=%s request=exact token proof\n' \
+    "$corr" "$corr" > "$status"
+  {
+    printf 'done oldcorr=%s: prefixed substring\n' "$corr"
+    printf 'done [corr=%s0]: overlong hex value\n' "$corr"
+  } > "$sm_home/state/amplifica.status"
+  before=$(cat "$status")
+
+  fm_pending_reply_tick "$state" || fail "invalid-correlation tick should succeed"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "a correlation substring must not resolve the pending reply"
+  [ "$(cat "$status")" = "$before" ] \
+    || fail "a correlation substring was mirrored into the parent channel"
+
+  printf 'done corr=%s\n' "$corr" >> "$sm_home/state/amplifica.status"
+  fm_pending_reply_tick "$state" || fail "exact-correlation tick should succeed"
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "a standalone exact correlation token must still resolve"
+  grep -Fqx "done corr=$corr" "$status" \
+    || fail "the standalone exact correlated line was not mirrored"
+  pass "local mirror accepts only standalone exact correlation tokens"
 }
 
 test_remote_own_home_report_is_not_locally_mirrored() {
@@ -1340,6 +1385,7 @@ test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
 test_local_own_home_report_is_mirrored_and_resolves
 test_local_mirror_requires_delivery
+test_local_mirror_requires_a_standalone_exact_corr_token
 test_remote_own_home_report_is_not_locally_mirrored
 test_unmarked_captain_input_creates_no_expectation
 test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
