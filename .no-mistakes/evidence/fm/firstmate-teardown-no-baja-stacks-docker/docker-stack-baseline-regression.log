@@ -1,0 +1,4 @@
+warning: You appear to have cloned an empty repository.
+not ok - docker-portable-core: task container remains after teardown
+base_commit=7a7f5ad1fb38924a3d088bdf52364dfee3025080
+exit_code=1

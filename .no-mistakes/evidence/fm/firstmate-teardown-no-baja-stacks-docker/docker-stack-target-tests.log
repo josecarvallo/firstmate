@@ -1,0 +1,31 @@
+warning: You appear to have cloned an empty repository.
+ok - portable teardown removes its task's docker container before returning the worktree
+warning: You appear to have cloned an empty repository.
+warning: You appear to have cloned an empty repository.
+ok - portable teardown leaves another task's docker stack intact
+warning: You appear to have cloned an empty repository.
+ok - a failed docker removal is visible and does not block teardown
+warning: You appear to have cloned an empty repository.
+warning: You appear to have cloned an empty repository.
+warning: You appear to have cloned an empty repository.
+warning: You appear to have cloned an empty repository.
+ok - hung docker commands are bounded and never block teardown
+warning: You appear to have cloned an empty repository.
+ok - an absent docker binary is a silent no-op and never breaks teardown
+warning: You appear to have cloned an empty repository.
+ok - an unreachable docker daemon is a silent no-op and never breaks teardown
+warning: You appear to have cloned an empty repository.
+ok - a task that never started a docker stack tears down silently
+warning: You appear to have cloned an empty repository.
+ok - a docker enumeration failure is reported visibly and never blocks teardown
+warning: You appear to have cloned an empty repository.
+ok - teardown stops and removes the docker container(s) started by its own worktree
+warning: You appear to have cloned an empty repository.
+warning: You appear to have cloned an empty repository.
+ok - tearing down task A's docker stack leaves task B's unrelated, concurrently-live stack fully intact
+warning: You appear to have cloned an empty repository.
+ok - a worktree field corrupted to point at the firstmate repo itself never reaches its docker containers
+warning: You appear to have cloned an empty repository.
+ok - a worktree field corrupted to point at the active firstmate home never reaches its docker containers
+warning: You appear to have cloned an empty repository.
+ok - a worktree field pointing at a real but unregistered directory never reaches its docker containers

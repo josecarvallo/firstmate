@@ -1,0 +1,16 @@
+warning: You appear to have cloned an empty repository.
+warning: You appear to have cloned an empty repository.
+SCENARIO: two task-local compose stacks are running
+BEFORE task_A containers=522bd7d618ee running=true
+BEFORE task_B containers=ddb9c4c0c124 running=true
+
+COMMAND: bin/fm-teardown.sh evidence-a --force
+teardown: stopping 1 docker container(s) started by task evidence-a's own worktree (/private/var/folders/q8/syy2n6811js_fff1n_ytff680000gn/T/fm-teardown-docker-stack.uXLOuB/evidence-a/wt)
+teardown evidence-a complete (window firstmate:fm-evidence-a, worktree /var/folders/q8/syy2n6811js_fff1n_ytff680000gn/T//fm-teardown-docker-stack.uXLOuB/evidence-a/wt)
+Backlog: evidence-a just finished. Run tasks-axi done evidence-a --note "local main", then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due.
+
+RESULT exit_code=0
+AFTER task_A containers=<none>
+AFTER task_B containers=ddb9c4c0c124 running=true
+AFTER task_A isolated_copy_returned=yes
+VERDICT: own stack removed before return; unrelated stack remained running

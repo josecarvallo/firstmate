@@ -1,0 +1,3 @@
+ok - local-only worktree with truly unpushed work is refused (safety preserved)
+ok - no-mistakes worktree with genuinely unlanded work is refused (safety preserved)
+ok - dirty worktree is refused even when its committed work has landed (dirty always wins)
