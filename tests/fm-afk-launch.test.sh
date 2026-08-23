@@ -516,6 +516,53 @@ unit_native_entry_refused() {
   rm -rf "$st"
 }
 
+unit_detached_entries_clear_native_sentinel() {
+  local st entry
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-detached-env.XXXXXX")
+  mkdir -p "$st/state"
+  entry="$st/entry.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s" "${FM_AFK_STATE_PREPARED:-unset}" > "$FM_HOME/prepared-value"\n' > "$entry"
+  chmod +x "$entry"
+
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 FM_AFK_LAUNCH_ENTRY="$entry" bash -c '
+    . "$1"
+    tmux() {
+      case "$1" in
+        new-session) bash -c "$5" ;;
+        has-session) return 0 ;;
+        *) return 0 ;;
+      esac
+    }
+    fm_afk_launch_create_tmux captain:0 tmux
+  ' _ "$LAUNCH"
+  if [ "$(cat "$st/prepared-value" 2>/dev/null || true)" = 0 ]; then
+    pass "tmux launch: detached entry clears an inherited native-path sentinel"
+  else
+    fail "tmux launch: detached entry inherited FM_AFK_STATE_PREPARED=1"
+  fi
+
+  rm -f "$st/prepared-value" "$st/state/.afk-daemon-terminal"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 FM_AFK_LAUNCH_ENTRY="$entry" bash -c '
+    . "$1"
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_cli() {
+      if [ "$2 $3" = "workspace create" ]; then
+        printf "%s\n" "{\"result\":{\"workspace\":{\"workspace_id\":\"ws\"},\"root_pane\":{\"pane_id\":\"pane\"}}}"
+      elif [ "$2 $3" = "pane run" ]; then
+        bash -c "$5"
+      fi
+    }
+    fm_afk_launch_create_herdr captain:0 herdr
+  ' _ "$LAUNCH"
+  if [ "$(cat "$st/prepared-value" 2>/dev/null || true)" = 0 ]; then
+    pass "Herdr launch: detached entry clears an inherited native-path sentinel"
+  else
+    fail "Herdr launch: detached entry inherited FM_AFK_STATE_PREPARED=1"
+  fi
+  rm -rf "$st"
+}
+
 # The reproduced false positive: a bare basename match on the daemon script
 # ("*fm-supervise-daemon.sh*", equivalent to `pgrep -f fm-supervise-daemon`)
 # says "alive" for ANY home's daemon process, not just this home's. A fake
@@ -1014,6 +1061,7 @@ unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
 unit_native_start_refused
 unit_native_entry_refused
+unit_detached_entries_clear_native_sentinel
 unit_daemon_liveness_is_home_scoped
 unit_stop_records_unexpected_daemon_death
 unit_stop_records_death_of_a_really_killed_daemon
