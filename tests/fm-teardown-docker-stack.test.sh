@@ -4,9 +4,6 @@
 #
 # Before this fix, a task's worktree could leave a docker compose stack
 # running forever after teardown, because nothing ever brought it down.
-# Observed cost on the captain's machine (2026-08-23): 119 live containers
-# left behind by finished tasks, system load 150, the captain's own local
-# database killed twice.
 #
 # Covers:
 #   - the core fix: a task's own docker containers are stopped and removed by
@@ -263,10 +260,8 @@ make_path_without_docker() {  # <case-dir>
 
 # Start a one-container docker compose stack rooted exactly at <dir>, so its
 # com.docker.compose.project.working_dir label equals <dir>. Registers the
-# stack's default network for this file's own cleanup (the fix under test only
-# removes containers, matching the acceptance bar of "no live containers
-# left", so the network is this test's own housekeeping, not something the
-# fix is expected to touch). Args: <dir> <project>
+# stack's default network for this file's own cleanup because teardown removes
+# only matching containers, not the network. Args: <dir> <project>
 start_docker_stack() {
   local dir=$1 project=$2 out
   cat > "$dir/docker-compose.yml" <<'YML'

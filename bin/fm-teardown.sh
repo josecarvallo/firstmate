@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; bring down the task's own docker
-# compose stack; kill the recorded runtime endpoint, clear volatile state,
-# refresh/prune the project's clone for PR-based ship tasks, then print a
-# backlog-refresh reminder for ship and scout teardowns (a secondmate teardown
-# prints none, since secondmates are not backlog items).
+# worktree, or retire a secondmate home; remove Docker Compose containers whose
+# working-directory label exactly matches the validated recorded worktree; kill
+# the recorded runtime endpoint, clear volatile state, refresh/prune the
+# project's clone for PR-based ship tasks, then print a backlog-refresh reminder
+# for ship and scout teardowns (a secondmate teardown prints none, since
+# secondmates are not backlog items).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -134,25 +135,18 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
-#   Fix 4 - bring down this task's own docker compose stack. A worker that
-#     started a docker compose stack (a local database, a supporting service)
-#     inside its own worktree left every container running forever once the
-#     worktree was returned - accumulated across many finished tasks, this
-#     overloaded the captain's machine (119 live containers, load 150,
-#     observed 2026-08-23; the captain's own local database was killed twice).
-#     teardown_task_docker_stack first refuses to trust the recorded worktree
-#     path at all unless it is neither the active firstmate home nor the
-#     firstmate repo itself, and IS a git worktree actually registered for the
-#     recorded project - so a corrupt or wrong "worktree=" field can never
-#     reach the captain's own containers or another home's/task's containers.
-#     Only past that identity check does it query docker, and ONLY by its own
-#     com.docker.compose.project.working_dir container label matching this
-#     exact canonical path - never a name pattern or a broad sweep - then
-#     stops and removes exactly those containers. A missing docker binary, an
-#     unreachable daemon, or a stack already down are ordinary silent no-ops.
-#     When the identity check or the enumeration itself fails, this reports
-#     the failure plainly and leaves every container alone rather than guess.
-#     Best effort: never blocks or refuses this teardown.
+#   Fix 4 - remove Docker Compose containers labeled with this task's recorded
+#     worktree before returning it. After a bounded Docker availability probe,
+#     teardown canonicalizes the path, rejects the active firstmate home and
+#     repo, and requires a git worktree registered for the recorded project.
+#     It then selects containers only by an exact
+#     com.docker.compose.project.working_dir label match, never by a name
+#     pattern or broad sweep. This removes matching containers, not Compose
+#     networks or other project resources. A missing Docker binary, an
+#     unreachable daemon, an absent or uninspectable worktree, or no matching
+#     containers is a silent no-op. Registration or enumeration failures and
+#     containers that remain after bounded removal attempts are reported, but
+#     Docker cleanup never blocks teardown.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1538,27 +1532,10 @@ EOF
   return 1
 }
 
-# Fix 4 (see script header): stop and remove exactly the containers of the
-# docker compose stack this task's own worktree started, identified only by
-# docker's own com.docker.compose.project.working_dir container label matching
-# this worktree's canonical path. Never a name pattern, never a broader query.
-#
-# Before ever querying docker, this refuses to treat the recorded worktree
-# path as this task's own unless it is (a) not the active firstmate home,
-# (b) not the firstmate repo itself, and (c) an actual git worktree
-# registered for the recorded project (worktree_registered_for_project, the
-# same check validate_child_worktree_for_removal uses before an rm -rf). A
-# corrupt or wrong "worktree=" field can never make this reach the captain's
-# own containers or another home's/task's containers - removing a container
-# is irreversible, so a metadata trust failure here skips and reports rather
-# than guesses. (a)+(b) exist because git itself lists the main checkout as a
-# "worktree" entry, so (c) alone cannot rule out FM_ROOT.
-#
-# A missing docker binary or an unreachable daemon are ordinary silent no-ops
-# (return 0), matching the "docker absent/daemon down is normal" contract in
-# the script header. When the daemon is reachable but the container query
-# itself fails, this reports the failure and leaves every container alone
-# rather than guess - also non-blocking, since this cleanup is best effort.
+# Fix 4 (see the script header for the complete cleanup contract). The exact
+# canonical working-directory label is the only container selector; the
+# explicit home and repo exclusions remain necessary because git registers the
+# main checkout as a worktree too.
 teardown_task_docker_stack() {  # <worktree-dir> <project>
   local dir=$1 project=$2 abs_dir abs_home abs_root ids id count failed_ids=
   [ -n "$dir" ] || return 0
