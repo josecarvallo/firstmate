@@ -300,19 +300,26 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
   esac
 }
 
-fm_afk_launch_wait_ready() {  # <backend> <target>
+fm_afk_launch_wait_recorded_daemon() {  # <backend> <target>
   local backend=$1 target=$2 attempt=0
+  while [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
+    daemon_lock_held_by_live_daemon && return 0
+    if ! fm_afk_launch_terminal_alive "$backend" "$target"; then
+      fm_afk_launch_terminal_absent "$backend" "$target" && return 1
+    fi
+    sleep 0.05
+  done
+  daemon_lock_held_by_live_daemon
+}
+
+fm_afk_launch_wait_ready() {  # <backend> <target>
+  local backend=$1 target=$2
   if [ -n "${FM_AFK_LAUNCH_ENTRY:-}" ]; then
     fm_afk_launch_terminal_alive "$backend" "$target"
     return
   fi
-  while [ "$attempt" -lt 100 ]; do
-    attempt=$((attempt + 1))
-    daemon_lock_held_by_live_daemon && return 0
-    fm_afk_launch_terminal_alive "$backend" "$target" || return 1
-    sleep 0.05
-  done
-  return 1
+  fm_afk_launch_wait_recorded_daemon "$backend" "$target"
 }
 
 fm_afk_launch_commit_terminal() {  # <backend> <target> <extra> [already-recorded]
@@ -481,8 +488,17 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
 }
 
+fm_afk_launch_refresh_active_daemon() {
+  fm_afk_launch_record_validate_if_present || return 1
+  if ! fm_afk_launch_flag_write; then
+    fm_afk_launch_log "failed to refresh away-mode flag"
+    return 1
+  fi
+  fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
+}
+
 fm_afk_launch_start() {
-  local captain_target captain_backend backup artifact had_afk=0 result
+  local captain_target captain_backend backup artifact had_afk=0 result read_result
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
@@ -490,17 +506,21 @@ fm_afk_launch_start() {
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
   if daemon_lock_held_by_live_daemon; then
-    fm_afk_launch_record_validate_if_present || return 1
-    if ! fm_afk_launch_flag_write; then
-      fm_afk_launch_log "failed to refresh away-mode flag"
-      return 1
-    fi
-    fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
-    return 0
+    fm_afk_launch_refresh_active_daemon
+    return
   fi
 
   if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
     had_afk=1
+    fm_afk_launch_record_read
+    read_result=$?
+    if [ "$read_result" -eq 0 ]; then
+      fm_afk_launch_wait_recorded_daemon "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" || true
+      if daemon_lock_held_by_live_daemon; then
+        fm_afk_launch_refresh_active_daemon
+        return
+      fi
+    fi
     fm_afk_launch_record_unexpected_death || return 1
   fi
 
@@ -582,6 +602,10 @@ fm_afk_launch_stop() {
   # first would make that flush a no-op via inject_msg's presence gate).
   pid=""
   pid_identity=""
+  if [ "$afk_was_active" -eq 1 ] && [ "$read_result" -eq 0 ] \
+    && ! daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_wait_recorded_daemon "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" || true
+  fi
   if daemon_lock_held_by_live_daemon; then
     pid=$(daemon_lock_pid 2>/dev/null) || return 1
     pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1

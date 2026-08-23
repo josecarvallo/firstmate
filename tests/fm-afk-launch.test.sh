@@ -253,6 +253,79 @@ unit_restart_records_unexpected_daemon_death() {
   rm -rf "$st"
 }
 
+unit_start_waits_for_recorded_terminal_readiness() {
+  local st fake_bin daemon_pid daemon_identity publisher status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-start-readiness.XXXXXX")
+  fake_bin="$st/bin"
+  mkdir -p "$st/state" "$fake_bin"
+  : > "$st/state/.afk"
+  printf 'tmux\tstarting-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  printf '#!/usr/bin/env bash\n[ "$1" = has-session ] && { : > "$FM_HOME/terminal-probed"; exit 0; }\nexit 1\n' > "$fake_bin/tmux"
+  chmod +x "$fake_bin/tmux"
+
+  sleep 30 &
+  daemon_pid=$!
+  daemon_identity=$( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" 2>/dev/null )
+  (
+    sleep 0.15
+    mkdir -p "$st/state/.supervise-daemon.lock"
+    printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+    printf '%s' "$daemon_identity" > "$st/state/.supervise-daemon.lock/pid-identity"
+  ) &
+  publisher=$!
+
+  PATH="$fake_bin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    FM_SUPERVISOR_TARGET=unused FM_SUPERVISOR_BACKEND=unsupported \
+    "$LAUNCH" start >/dev/null 2>&1
+  status=$?
+  wait "$publisher" 2>/dev/null || true
+  if [ "$status" -eq 0 ] \
+    && [ -e "$st/terminal-probed" ] \
+    && [ ! -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && [ -e "$st/state/.afk" ] \
+    && [ -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "start readiness: live recorded terminal can publish its daemon lock before death is declared"
+  else
+    fail "start readiness: in-progress detached launch was reported as an unexpected death"
+  fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_stop_confirms_recorded_terminal_absence_before_death() {
+  local st fake_bin status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-readiness.XXXXXX")
+  fake_bin="$st/bin"
+  mkdir -p "$st/state" "$fake_bin"
+  : > "$st/state/.afk"
+  printf 'tmux\tabsent-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'if [ "$1" = has-session ]; then' \
+    '  if [ ! -e "$FM_HOME/first-terminal-probe" ]; then' \
+    '    : > "$FM_HOME/first-terminal-probe"' \
+    '    [ ! -e "$FM_HOME/state/.afk-daemon-died-unexpectedly" ] || : > "$FM_HOME/death-before-first-probe"' \
+    '  fi' \
+    '  printf "%s" "can'"'"'t find session: absent-session" >&2' \
+    '  exit 1' \
+    'fi' \
+    'exit 1' > "$fake_bin/tmux"
+  chmod +x "$fake_bin/tmux"
+
+  PATH="$fake_bin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    "$LAUNCH" stop >/dev/null 2>&1
+  status=$?
+  if [ "$status" -eq 0 ] \
+    && [ -e "$st/first-terminal-probe" ] \
+    && [ ! -e "$st/death-before-first-probe" ] \
+    && [ -e "$st/state/.afk-daemon-died-unexpectedly" ]; then
+    pass "stop readiness: recorded terminal absence is confirmed before death is declared"
+  else
+    fail "stop readiness: death was declared without first excluding terminal startup"
+  fi
+  rm -rf "$st"
+}
+
 unit_unexpected_death_record_failure_preserves_away_state() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-record-failure.XXXXXX")
@@ -1102,6 +1175,8 @@ unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
 unit_restart_records_unexpected_daemon_death
+unit_start_waits_for_recorded_terminal_readiness
+unit_stop_confirms_recorded_terminal_absence_before_death
 unit_unexpected_death_record_failure_preserves_away_state
 unit_concurrent_start_serialized
 unit_lock_initialization_grace
