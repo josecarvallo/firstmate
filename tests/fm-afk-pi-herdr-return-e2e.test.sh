@@ -9,7 +9,9 @@
 #   - the existing wedge alarm remains observable and deduped;
 #   - clearing the draft makes the genuinely idle Pi composer injectable;
 #   - verified submit preserves the terminal-safe marker and clears delivery state;
-#   - an unmarked return request opens the catch-up gate before Bearings;
+#   - an unmarked return request opens the catch-up gate, whereupon a read-only
+#     Bearings report passes and surfaces the pending catch-up while the strict
+#     guard still blocks mutating work;
 #   - remediation/resolution clears the gate, and re-entry is idempotent.
 set -u
 
@@ -266,13 +268,24 @@ set -e
 DAEMON_STARTED=0
 [ "$RETURN_RC" -eq 3 ] || fail "return catch-up did not gate the still-live blocker (rc=$RETURN_RC): $RETURN_OUT"
 assert_contains "$RETURN_OUT" 'firstmate-actionable blocker: repair-task [key=synthetic-dependency]' "return gate did not assign remediation"
+# A read-only Bearings report now PASSES the return gate (captain direction
+# 2026-08-22) and surfaces the pending catch-up prominently instead of refusing;
+# the strict guard and every mutating path stay blocked.
 set +e
 BEARINGS_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
   "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1)
 BEARINGS_RC=$?
 set -e
-[ "$BEARINGS_RC" -eq 3 ] || fail "Bearings bypassed the return gate (rc=$BEARINGS_RC): $BEARINGS_OUT"
-pass "real unmarked Pi return opens catch-up and blocks Bearings before the unresolved blocker can be deferred"
+[ "$BEARINGS_RC" -eq 0 ] || fail "read-only Bearings did not pass the return gate (rc=$BEARINGS_RC): $BEARINGS_OUT"
+printf '%s' "$BEARINGS_OUT" | jq -e '.return_catchup_pending == true and (.return_catchup | any(.[]; .id == "repair-task"))' >/dev/null \
+  || fail "Bearings did not surface the pending catch-up blocker prominently: $BEARINGS_OUT"
+set +e
+GUARD_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
+  "$ROOT/bin/fm-afk-return.sh" guard 2>&1)
+GUARD_RC=$?
+set -e
+[ "$GUARD_RC" -eq 3 ] || fail "strict guard let mutating work through the return gate (rc=$GUARD_RC): $GUARD_OUT"
+pass "real unmarked Pi return opens catch-up: the read-only report passes and surfaces it while the strict guard still blocks mutating work"
 
 printf 'resolved [key=synthetic-dependency]: refreshed the synthetic token and resumed the task\n' >> "$STATE/repair-task.status"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
