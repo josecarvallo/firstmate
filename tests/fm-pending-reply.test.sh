@@ -876,6 +876,7 @@ test_local_mirror_requires_a_standalone_exact_corr_token() {
   {
     printf 'done oldcorr=%s: prefixed substring\n' "$corr"
     printf 'done [corr=%s0]: overlong hex value\n' "$corr"
+    printf 'done [corr=%sg]: alphanumeric suffix\n' "$corr"
   } > "$sm_home/state/amplifica.status"
   before=$(cat "$status")
 

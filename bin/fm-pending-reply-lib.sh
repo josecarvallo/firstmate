@@ -174,7 +174,7 @@ fm_pending_reply_text_has_corr() {  # <text> <corr_id>
   [ "${#corr}" -eq 16 ] || return 1
   case "$corr" in *[!0-9a-f]*) return 1 ;; esac
   printf '%s\n' "$text" \
-    | LC_ALL=C grep -Eq "(^|[^[:alnum:]])corr=${corr}([^[:xdigit:]]|$)"
+    | LC_ALL=C grep -Eq "(^|[^[:alnum:]])corr=${corr}([^[:alnum:]]|$)"
 }
 
 # Sanitize a short request summary: single line, bounded, no control chars.
