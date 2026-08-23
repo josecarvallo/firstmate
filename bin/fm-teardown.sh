@@ -140,15 +140,19 @@
 #     worktree was returned - accumulated across many finished tasks, this
 #     overloaded the captain's machine (119 live containers, load 150,
 #     observed 2026-08-23; the captain's own local database was killed twice).
-#     teardown_task_docker_stack identifies the stack ONLY by docker's own
+#     teardown_task_docker_stack first refuses to trust the recorded worktree
+#     path at all unless it is neither the active firstmate home nor the
+#     firstmate repo itself, and IS a git worktree actually registered for the
+#     recorded project - so a corrupt or wrong "worktree=" field can never
+#     reach the captain's own containers or another home's/task's containers.
+#     Only past that identity check does it query docker, and ONLY by its own
 #     com.docker.compose.project.working_dir container label matching this
-#     exact task worktree's canonical path - never a name pattern, a broad
-#     sweep, or any other task's or home's containers - then stops and removes
-#     exactly those containers. A missing docker binary, an unreachable daemon,
-#     or a stack already down are ordinary silent no-ops. When the daemon
-#     answers but enumeration itself fails, this reports the failure plainly
-#     and leaves every container alone rather than guess. Best effort: never
-#     blocks or refuses this teardown.
+#     exact canonical path - never a name pattern or a broad sweep - then
+#     stops and removes exactly those containers. A missing docker binary, an
+#     unreachable daemon, or a stack already down are ordinary silent no-ops.
+#     When the identity check or the enumeration itself fails, this reports
+#     the failure plainly and leaves every container alone rather than guess.
+#     Best effort: never blocks or refuses this teardown.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1534,17 +1538,43 @@ EOF
 # docker compose stack this task's own worktree started, identified only by
 # docker's own com.docker.compose.project.working_dir container label matching
 # this worktree's canonical path. Never a name pattern, never a broader query.
+#
+# Before ever querying docker, this refuses to treat the recorded worktree
+# path as this task's own unless it is (a) not the active firstmate home,
+# (b) not the firstmate repo itself, and (c) an actual git worktree
+# registered for the recorded project (worktree_registered_for_project, the
+# same check validate_child_worktree_for_removal uses before an rm -rf). A
+# corrupt or wrong "worktree=" field can never make this reach the captain's
+# own containers or another home's/task's containers - removing a container
+# is irreversible, so a metadata trust failure here skips and reports rather
+# than guesses. (a)+(b) exist because git itself lists the main checkout as a
+# "worktree" entry, so (c) alone cannot rule out FM_ROOT.
+#
 # A missing docker binary or an unreachable daemon are ordinary silent no-ops
 # (return 0), matching the "docker absent/daemon down is normal" contract in
 # the script header. When the daemon is reachable but the container query
 # itself fails, this reports the failure and leaves every container alone
 # rather than guess - also non-blocking, since this cleanup is best effort.
-teardown_task_docker_stack() {  # <worktree-dir>
-  local dir=$1 abs_dir ids id count
+teardown_task_docker_stack() {  # <worktree-dir> <project>
+  local dir=$1 project=$2 abs_dir abs_home abs_root ids id count
   [ -n "$dir" ] || return 0
   command -v docker >/dev/null 2>&1 || return 0
   docker info >/dev/null 2>&1 || return 0
   abs_dir=$(canonical_existing_dir "$dir") || return 0
+  abs_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || abs_home=
+  if [ -n "$abs_home" ] && { [ "$abs_home" = "$abs_dir" ] || path_is_ancestor_of "$abs_home" "$abs_dir"; }; then
+    echo "warning: task $ID's recorded worktree $abs_dir is the active firstmate home itself; refusing to touch any docker stack there" >&2
+    return 0
+  fi
+  abs_root=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || abs_root=
+  if [ -n "$abs_root" ] && { [ "$abs_root" = "$abs_dir" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; }; then
+    echo "warning: task $ID's recorded worktree $abs_dir is the firstmate repo itself; refusing to touch any docker stack there" >&2
+    return 0
+  fi
+  if ! worktree_registered_for_project "$project" "$dir"; then
+    echo "warning: cannot verify $abs_dir is task $ID's own registered worktree of ${project:-<no project recorded>}; leaving any docker stack in place for manual inspection" >&2
+    return 0
+  fi
   if ! ids=$(docker ps -aq --filter "label=com.docker.compose.project.working_dir=$abs_dir" 2>&1); then
     echo "warning: cannot enumerate docker containers for task $ID's worktree $abs_dir ($ids); leaving any docker stack in place for manual inspection" >&2
     return 0
@@ -2432,7 +2462,7 @@ fi
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
-  teardown_task_docker_stack "$WT"
+  teardown_task_docker_stack "$WT" "$PROJ"
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already

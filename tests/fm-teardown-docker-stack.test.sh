@@ -19,9 +19,15 @@
 #     started a stack are all ordinary, silent no-ops.
 #   - a container-enumeration failure (daemon reachable, query itself fails)
 #     is reported visibly and never blocks teardown.
+#   - the identity guard: a "worktree=" meta field corrupted to point at the
+#     firstmate home/repo itself, or at a real but unregistered directory,
+#     never lets docker cleanup reach a container labeled with that path
+#     (test_docker_stack_never_touches_firstmate_home_or_root,
+#     test_docker_stack_never_touches_unregistered_directory).
 #
 # The whole file is gated on a real, reachable docker daemon: the isolation
-# test in particular needs real containers, not mocks, to mean anything.
+# and identity-guard tests in particular need real containers, not mocks, to
+# mean anything.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -186,6 +192,38 @@ $1
 EOF
 }
 
+# Rewrite a case's meta with a different "worktree=" value, everything else
+# unchanged from make_case. Used to simulate the exact metadata-corruption
+# class the identity guard exists for: a "worktree=" field that does not
+# actually point at this task's own registered worktree. Args: <case_dir>
+# <id> <bad-worktree-path>
+corrupt_meta_worktree() {
+  local case_dir=$1 id=$2 bad=$3
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$bad" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+}
+
+# Start a single container carrying exactly the compose working_dir label a
+# real stack would have, without needing a real compose stack rooted there -
+# so the identity-guard tests below can label a container with the firstmate
+# repo's own path, or an unregistered directory's path, without actually
+# running docker compose against either. Echoes the container id.
+# Args: <working-dir-label-value>
+start_labeled_container() {
+  local label_value=$1 out id
+  if ! out=$(docker run -d --label "com.docker.compose.project.working_dir=$label_value" busybox sleep 3600 2>&1); then
+    fail "docker fixture: failed to start labeled container for $label_value: $out"
+  fi
+  id=$(printf '%s\n' "$out" | tail -1)
+  DOCKER_CLEANUP_CONTAINER_IDS+=("$id")
+  printf '%s\n' "$id"
+}
+
 test_docker_stack_is_stopped_on_teardown() {
   local id=docker-core case_dir abs_wt project ids rc
   case_dir=$(make_case "$id")
@@ -327,9 +365,60 @@ SH
   pass "a docker enumeration failure is reported visibly and never blocks teardown"
 }
 
+# The most consequential guard in this feature: a corrupted or wrong
+# "worktree=" meta field must never let docker cleanup reach the captain's own
+# firstmate home/repo, even though every other check in this file already
+# passes (docker present, daemon reachable, real container to find).
+test_docker_stack_never_touches_firstmate_home_or_root() {
+  local id=docker-guard-root case_dir canon_root cid rc
+  case_dir=$(make_case "$id")
+  canon_root=$(canon "$ROOT")
+  corrupt_meta_worktree "$case_dir" "$id" "$canon_root"
+  cid=$(start_labeled_container "$canon_root")
+
+  set +e
+  run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-guard-root: teardown should still succeed"
+
+  [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] \
+    || fail "docker-guard-root: CRITICAL - a container labeled with the firstmate repo's own path was removed via a corrupted worktree field"
+  assert_grep "firstmate repo itself" "$case_dir/stderr" \
+    "docker-guard-root: teardown should visibly report refusing to treat the firstmate repo/home as a task worktree"
+  pass "a worktree field corrupted to point at the firstmate repo/home itself never reaches its docker containers"
+}
+
+# A worktree field pointing at a real, existing directory that simply is not
+# a registered git worktree of the recorded project - not the captain's home,
+# just untrusted - must be treated with the same "cannot verify" caution.
+test_docker_stack_never_touches_unregistered_directory() {
+  local id=docker-guard-unregistered case_dir bogus_dir canon_bogus cid rc
+  case_dir=$(make_case "$id")
+  bogus_dir="$TMP_ROOT/$id-bogus"
+  mkdir -p "$bogus_dir"
+  canon_bogus=$(canon "$bogus_dir")
+  corrupt_meta_worktree "$case_dir" "$id" "$bogus_dir"
+  cid=$(start_labeled_container "$canon_bogus")
+
+  set +e
+  run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-guard-unregistered: teardown should still succeed"
+
+  [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] \
+    || fail "docker-guard-unregistered: a container labeled with an unregistered directory was removed"
+  assert_grep "cannot verify" "$case_dir/stderr" \
+    "docker-guard-unregistered: teardown should visibly report it cannot verify this is the task's own registered worktree"
+  pass "a worktree field pointing at a real but unregistered directory never reaches its docker containers"
+}
+
 test_docker_stack_is_stopped_on_teardown
 test_docker_stack_isolation_leaves_other_task_untouched
 test_docker_absent_does_not_break_teardown
 test_docker_daemon_unreachable_does_not_break_teardown
 test_no_docker_stack_present_completes_silently
 test_docker_enumeration_failure_is_reported_and_non_blocking
+test_docker_stack_never_touches_firstmate_home_or_root
+test_docker_stack_never_touches_unregistered_directory
