@@ -82,9 +82,9 @@
 # the worker's copy, leaving the parent's fold showing an answered, already
 # executed decision as open forever - the one surface the captain reads to know
 # what still waits on them. So a key open in the parent channel is closed there
-# too, in the same confirmed-delivery step, with an at-most-once append (the
-# parent's log is not this home's bookkeeping: the append must wake the parent,
-# and a replay must not stack duplicates). The invariant is that a decision closes
+# too, in the same confirmed-delivery step, with a serialized live-state append
+# (the parent's log is not this home's bookkeeping: the append must wake the
+# parent, and a replay must not stack duplicates). The invariant is that a decision closes
 # in the channel where it opened; when this home is a secondmate whose parent
 # channel cannot be resolved, --resolve-key refuses BEFORE sending rather than
 # closing one copy and stranding the other in silence. A key in a reserved
@@ -361,6 +361,10 @@ fm_send_add_resolve_key() {  # <key>
       return 1
       ;;
   esac
+  if ! fm_cap_prefixed_line_var "resolved [key=$k]: answered: " x; then
+    echo "error: --resolve-key '$k' is too long to preserve in the closing status line" >&2
+    return 1
+  fi
   case " $RESOLVE_KEYS " in
     *" $k "*)
       echo "error: duplicate --resolve-key '$k'" >&2
@@ -489,10 +493,8 @@ if [ -n "$RESOLVE_KEYS" ]; then
       "$k"$'\t'*|*$'\n'"$k"$'\t'*)
         # A reserved namespace has exactly one owning library, which is the only
         # thing that may open or close it. Leave that copy entirely alone rather
-        # than propagating a foreign close into it. "answered:" is the exact note
-        # prefix the close below writes, so this asks the owning rule the same
-        # question the fold will ask of the real line.
-        if fm_classify_decision_key_transition_allowed "$k" "answered:"; then
+        # than propagating a foreign close into it.
+        if ! fm_classify_decision_key_is_reserved "$k"; then
           RESOLVE_PARENT_KEYS="${RESOLVE_PARENT_KEYS}${RESOLVE_PARENT_KEYS:+ }$k"
           resolve_key_owned=1
         fi
@@ -519,14 +521,12 @@ fi
 # (bin/fm-wake-lib.sh) and does not wake this same session again; any
 # concurrent foreign status bytes leave the watcher's wake path untouched.
 fm_send_close_resolved_keys() {  # <answer-text>
-  local note=$1 k line append_rc
+  local note=$1 k prefix
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
-    line="resolved [key=$k]: answered: $note"
-    fm_cap_line_var "$line"
-    append_rc=0
-    fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "$FM_LINE_CAP_LINE" || append_rc=$?
-    if [ "$append_rc" -eq 2 ]; then
+    prefix="resolved [key=$k]: answered: "
+    fm_cap_prefixed_line_var "$prefix" "$note" || return 1
+    if ! fm_parent_channel_append_close_if_open "$RESOLVE_STATUS_FILE" "$k" "$FM_LINE_CAP_LINE" "$STATE"; then
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
       return 1
     fi
@@ -534,13 +534,13 @@ fm_send_close_resolved_keys() {  # <answer-text>
   # Every live copy of an answered key, not just the local one. When this home is
   # a secondmate that relayed the decision upstream, the copy the PARENT's fold
   # reads lives in the parent's own log, and closing only the local copy is what
-  # left answered decisions open there forever. The append is plain and
-  # at-most-once: it must wake the parent (it is the parent's own log, not this
-  # home's bookkeeping), and a replay must not stack duplicates.
+  # left answered decisions open there forever. The append is plain and must
+  # wake the parent because it is the parent's own log, not this home's
+  # bookkeeping.
   for k in $RESOLVE_PARENT_KEYS; do
-    line="resolved [key=$k]: answered: $note"
-    fm_cap_line_var "$line"
-    if ! fm_parent_channel_append_once "$RESOLVE_PARENT_CHANNEL" "$FM_LINE_CAP_LINE"; then
+    prefix="resolved [key=$k]: answered: "
+    fm_cap_prefixed_line_var "$prefix" "$note" || return 1
+    if ! fm_parent_channel_append_close_if_open "$RESOLVE_PARENT_CHANNEL" "$k" "$FM_LINE_CAP_LINE"; then
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in the parent escalation channel $RESOLVE_PARENT_CHANNEL, where this home opened it. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_PARENT_CHANNEL - do not resend the answer." >&2
       return 1
     fi

@@ -31,10 +31,13 @@ _FM_PARENT_CHANNEL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/
 . "$_FM_PARENT_CHANNEL_LIB_DIR/fm-secondmate-parent-lib.sh"
 
 # Read this home's secondmate identity marker.
-# 0 + prints the id; 1 = no marker (a primary home); 2 = marker present but unusable.
+# 0 + prints the id; 1 = no parent evidence; 2 = parent evidence is unusable.
 fm_parent_channel_self_id() {  # <home>
-  local marker="$1/.fm-secondmate-home" id
+  local marker="$1/.fm-secondmate-home" binding="$1/.fm-secondmate-parent" id
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    if [ -e "$binding" ] || [ -L "$binding" ]; then
+      return 2
+    fi
     return 1
   fi
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 2
@@ -86,11 +89,11 @@ fm_parent_channel_path() {  # <home> <state-dir>
   printf '%s\n' "$path"
 }
 
-# Append one line to a parent channel at most once.
-# A replayed close, a retried escalation, and the mate's own belt-and-braces
-# repeat must all converge on one line rather than stack duplicates in the
-# parent's log. A symlinked destination is refused rather than followed out of
-# the state directory.
+# Append one identical immutable line to a parent channel at most once.
+# A retried escalation, an inactive receipt, and the mate's own belt-and-braces
+# repeat converge on one line rather than stack duplicates in the parent's log.
+# A symlinked destination is refused rather than followed out of the state
+# directory.
 fm_parent_channel_append_once() {  # <path> <line>
   local path=$1 line=$2 dir
   [ -n "$path" ] || return 1
@@ -102,4 +105,32 @@ fm_parent_channel_append_once() {  # <path> <line>
     return 0
   fi
   printf '%s\n' "$line" >> "$path"
+}
+
+fm_parent_channel_append_close_if_open() {  # <path> <key> <line> [<self-announced-state>]
+  local path=$1 key=$2 line=$3 self_state=${4:-} dir lock open append_rc=0 rc=0
+  [ -n "$path" ] && [ -n "$key" ] || return 1
+  [ ! -L "$path" ] || return 1
+  dir=$(dirname "$path")
+  mkdir -p "$dir" 2>/dev/null || return 1
+  [ -d "$dir" ] || return 1
+  lock="$path.decision-transition.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ -L "$path" ]; then
+    rc=1
+  else
+    open=$(status_open_decisions "$path")
+    case "$open" in
+      "$key"$'\t'*|*$'\n'"$key"$'\t'*)
+        if [ -n "$self_state" ]; then
+          fm_wake_status_append_self_announced "$self_state" "$path" "$line" || append_rc=$?
+          [ "$append_rc" -ne 2 ] || rc=1
+        else
+          printf '%s\n' "$line" >> "$path" || rc=1
+        fi
+        ;;
+    esac
+  fi
+  fm_lock_release "$lock"
+  return "$rc"
 }

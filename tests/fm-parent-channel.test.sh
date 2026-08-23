@@ -24,8 +24,8 @@
 # directly; it cannot become a projection of some other owner without a new
 # source of truth spanning two independent homes with no shared transaction.
 # Propagation matches the existing grain instead - the close is already an
-# append written by the answerer, and an at-most-once append makes it safe
-# under replay.
+# append written by the answerer, and a serialized live-state append makes it
+# safe under replay and key reuse.
 #
 # These tests drive the real executables and assert through the real consumer
 # (fm-wake-drain.sh's OPEN DECISIONS section for the parent home), never
@@ -153,11 +153,10 @@ test_full_cycle_close_reaches_parent_channel() {
   pass "parent channel: a close aimed at the worker also closes the key the mate opened upstream"
 }
 
-# The close must be idempotent: a re-sent answer, or the mate's own manual
-# belt-and-braces repeat, must converge on one line rather than stack copies in
-# the parent's log.
-test_close_propagation_is_idempotent() {
-  local dir fb log parent mate pair rc n
+# Reopening a key is a new decision lifetime even when its answer repeats, while
+# repeating a close against an already-closed lifetime remains a no-op.
+test_reopened_key_closes_and_close_replay_is_idempotent() {
+  local dir fb log parent mate pair rc n out
   dir="$TMP_ROOT/idem"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   pair=$(setup_pair idem beta)
@@ -169,14 +168,26 @@ test_close_propagation_is_idempotent() {
 
   run_send "$fb" "$mate" "$log" w1 --resolve-key dup-guard "pick a"; rc=$?
   expect_code 0 "$rc" "the first answer should succeed"
-  # Re-open and answer again with the same text: the parent channel must not
-  # collect a second identical closing line.
+  # Re-open both live copies and answer again with the same text.
   printf 'needs-decision [key=dup-guard]: a or b\n' >> "$mate/state/w1.status"
-  run_send "$fb" "$mate" "$log" w1 --resolve-key dup-guard "pick a" >/dev/null 2>&1 || true
+  printf 'needs-decision [key=dup-guard]: a or b\n' >> "$parent/state/beta.status"
+  run_send "$fb" "$mate" "$log" w1 --resolve-key dup-guard "pick a"; rc=$?
+  expect_code 0 "$rc" "the reopened decision should accept the repeated answer"
+  out=$(drain_out "$parent")
+  if printf '%s' "$out" | grep -F '[key=dup-guard]' >/dev/null; then
+    fail "the reopened decision stayed open after the repeated answer: $out"
+  fi
   n=$(grep -c 'resolved \[key=dup-guard\]' "$parent/state/beta.status" || true)
-  [ "$n" = 1 ] \
-    || fail "the parent channel collected $n copies of one closing line: $(cat "$parent/state/beta.status")"
-  pass "parent channel: a replayed close converges on one line, never stacked duplicates"
+  [ "$n" = 2 ] \
+    || fail "two decision lifetimes should have two closes, found $n: $(cat "$parent/state/beta.status")"
+
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate resolved --key dup-guard "pick a" >/dev/null 2>&1 \
+    || fail "replaying an already-settled close should succeed"
+  n=$(grep -c 'resolved \[key=dup-guard\]' "$parent/state/beta.status" || true)
+  [ "$n" = 2 ] \
+    || fail "an already-settled close replay appended a third line: $(cat "$parent/state/beta.status")"
+  pass "parent channel: reopened keys close again, while settled close replays remain idempotent"
 }
 
 # ---------------------------------------------------------------------------
@@ -341,6 +352,71 @@ iota' '../parent' 'has space'; do
   pass "parent channel: a corrupt identity marker refuses, a well-formed one still routes"
 }
 
+test_parent_evidence_without_identity_refuses() {
+  local dir fb log err parent mate pair rc
+  dir="$TMP_ROOT/missing-marker"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/err.log"
+  pair=$(setup_pair missing-marker iota)
+  parent=${pair% *}; mate=${pair#* }
+
+  fm_write_meta "$mate/state/w5.meta" "window=sess:fm-w5" "kind=ship"
+  printf 'needs-decision [key=upstream]: a or b\n' > "$mate/state/w5.status"
+  printf 'needs-decision [key=upstream]: a or b\n' > "$parent/state/iota.status"
+  rm -f "$mate/.fm-secondmate-home"
+
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" w5 --resolve-key upstream "a" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a parent binding without an identity marker was treated as a primary home"
+  assert_contains "$(cat "$err")" "cannot be resolved" "the missing identity must be classified as an unresolvable parent channel"
+  [ ! -s "$log" ] || fail "the missing-identity send still typed text: $(cat "$log")"
+  if grep -F 'resolved' "$mate/state/w5.status" >/dev/null; then
+    fail "the missing-identity send closed only the local copy"
+  fi
+
+  mv "$mate/.fm-secondmate-parent" "$mate/parent-binding-record"
+  ln -s "$mate/parent-binding-record" "$mate/.fm-secondmate-parent"
+  if env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+      "$REPORT" --escalate blocked --key upstream "still waiting" \
+      >/dev/null 2>"$err"; then
+    fail "symlinked parent evidence without an identity marker was treated as no parent"
+  fi
+  assert_contains "$(cat "$err")" "cannot be resolved" "symlinked parent evidence must remain unresolvable"
+  pass "parent channel: any parent evidence without a usable identity fails visibly"
+}
+
+test_long_key_metadata_survives_and_closes() {
+  local dir fb log parent mate pair rc out long_key long_note line_len
+  dir="$TMP_ROOT/long-key"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  pair=$(setup_pair long-key kappa)
+  parent=${pair% *}; mate=${pair#* }
+  long_key=$(printf 'k%.0s' {1..175})
+  long_note=$(printf 'n%.0s' {1..240})
+
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate needs-decision --key "$long_key" "$long_note" \
+    >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "a key that fits with intact metadata should be accepted"
+  grep -F "[key=$long_key]" "$parent/state/kappa.status" >/dev/null \
+    || fail "the long opening key was truncated: $(cat "$parent/state/kappa.status")"
+  line_len=$(awk 'NR == 1 { print length($0) }' "$parent/state/kappa.status")
+  [ "$line_len" -le 220 ] || fail "the capped escalation exceeded 220 characters: $line_len"
+
+  fm_write_meta "$mate/state/w6.meta" "window=sess:fm-w6" "kind=ship"
+  printf 'needs-decision [key=%s]: local copy\n' "$long_key" > "$mate/state/w6.status"
+  run_send "$fb" "$mate" "$log" w6 --resolve-key "$long_key" "closed"; rc=$?
+  expect_code 0 "$rc" "the intact long key should remain closeable by its original value"
+  grep -F "resolved [key=$long_key]" "$parent/state/kappa.status" >/dev/null \
+    || fail "the long closing key was truncated: $(cat "$parent/state/kappa.status")"
+  out=$(drain_out "$parent")
+  if printf '%s' "$out" | grep -F "[key=$long_key]" >/dev/null; then
+    fail "the long key remained open after resolving it with the original value: $out"
+  fi
+  pass "parent channel: long decision keys preserve metadata and remain closeable"
+}
+
 # ---------------------------------------------------------------------------
 # 5. The reserved pending-reply-<id> namespace keeps its single owner.
 # ---------------------------------------------------------------------------
@@ -371,14 +447,21 @@ test_reserved_namespace_is_not_propagated() {
       >/dev/null 2>&1; then
     fail "the escalation helper claimed a reserved key namespace"
   fi
+  if env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+      "$REPORT" --escalate needs-decision --key pending-reply-abcdef0123456789 \
+      "pending-reply-missed: task=x" >/dev/null 2>&1; then
+    fail "owner-like caller text bypassed the reserved key namespace"
+  fi
   pass "parent channel: the reserved pending-reply namespace keeps its single owner"
 }
 
 test_full_cycle_close_reaches_parent_channel
-test_close_propagation_is_idempotent
+test_reopened_key_closes_and_close_replay_is_idempotent
 test_mate_originated_escalation_reaches_parent
 test_remote_route_uses_mirrored_channel
 test_primary_home_unaffected_and_broken_binding_refuses
 test_symlinked_parent_channel_refuses
 test_corrupt_identity_marker_refuses
+test_parent_evidence_without_identity_refuses
+test_long_key_metadata_survives_and_closes
 test_reserved_namespace_is_not_propagated

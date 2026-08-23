@@ -36,8 +36,8 @@
 # --escalate refuses rather than guessing: a home with no parent binding, an
 # unreadable binding, and a key in a reserved namespace whose owning library is
 # the only thing allowed to open or close it all fail loudly. An escalation is
-# appended at most once, so a retried or repeated escalation converges on one
-# line in the parent's log.
+# appended idempotently, so retries converge on the channel's current decision
+# state.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,8 +96,7 @@ if [ "${1:-}" = "--escalate" ]; then
   STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   # A reserved key namespace has exactly one owning library; a self-raised
   # escalation must never claim one, or it could block that owner's close.
-  if [ -n "$KEY" ] \
-    && ! fm_classify_decision_key_transition_allowed "$KEY" "$NOTE"; then
+  if [ -n "$KEY" ] && fm_classify_decision_key_is_reserved "$KEY"; then
     echo "error: --key '$KEY' is in a reserved namespace whose owning library is the only writer that may open or close it; pick a key of your own." >&2
     exit 1
   fi
@@ -116,13 +115,21 @@ if [ "${1:-}" = "--escalate" ]; then
   esac
   NOTE=$(printf '%s' "$NOTE" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   if [ -n "$KEY" ]; then
-    LINE="$VERB [key=$KEY]: $NOTE"
+    LINE_PREFIX="$VERB [key=$KEY]: "
   else
-    LINE="$VERB: $NOTE"
+    LINE_PREFIX="$VERB: "
   fi
-  fm_cap_line_var "$LINE"
-  fm_parent_channel_append_once "$CHANNEL" "$FM_LINE_CAP_LINE" \
-    || { echo "error: could not append the escalation to $CHANNEL" >&2; exit 1; }
+  fm_cap_prefixed_line_var "$LINE_PREFIX" "$NOTE" \
+    || { echo "error: --key '$KEY' is too long to preserve in the parent escalation channel" >&2; exit 1; }
+  if [ "$VERB" = "$ESC_RESOLVE_VERB" ] && [ -n "$KEY" ]; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
+    fm_parent_channel_append_close_if_open "$CHANNEL" "$KEY" "$FM_LINE_CAP_LINE" \
+      || { echo "error: could not close the escalation in $CHANNEL" >&2; exit 1; }
+  else
+    fm_parent_channel_append_once "$CHANNEL" "$FM_LINE_CAP_LINE" \
+      || { echo "error: could not append the escalation to $CHANNEL" >&2; exit 1; }
+  fi
   printf 'escalated to %s\n' "$CHANNEL"
   exit 0
 fi
