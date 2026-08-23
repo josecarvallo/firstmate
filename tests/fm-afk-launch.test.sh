@@ -567,9 +567,49 @@ unit_stop_records_unexpected_daemon_death() {
   : > "$st/state/.afk"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
   if [ -e "$st/state/.afk-daemon-died-unexpectedly" ] && [ ! -e "$st/state/.afk" ]; then
-    pass "stop: an already-dead daemon while away mode was active is recorded, not silently accepted"
+    pass "stop: away mode active with no lock at all is recorded, not silently accepted"
   else
-    fail "stop: an already-dead daemon while away mode was active left no durable record"
+    fail "stop: away mode active with no lock at all left no durable record"
+  fi
+  rm -rf "$st"
+}
+
+# Stronger than the fixture above: a REAL daemon-shaped process is registered
+# in this home's lock exactly like fm-supervise-daemon.sh registers itself,
+# then killed by SIGTERM entirely OUT OF BAND - never through
+# bin/fm-afk-launch.sh stop - with no trap of its own, the same default
+# disposition a harness's own background-task teardown produces (the
+# reproduced 2026-08-23 failure this brief fixes). Only after it has actually
+# exited does this call stop, the same order the captain's return produces
+# hours later. This proves the signal fires for a daemon that truly died, not
+# only for a fixture where no lock ever existed.
+unit_stop_records_death_of_a_really_killed_daemon() {
+  local st lock daemon_pid registered
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-real-death.XXXXXX")
+  mkdir -p "$st/state"
+  date '+%s' > "$st/state/.afk"
+  bash -c 'while :; do sleep 0.2; done' &
+  daemon_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$daemon_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '. "$1"; daemon_lock_held_by_live_daemon' _ "$START"; then
+    registered=1
+  else
+    registered=0
+  fi
+  kill -TERM "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  if [ "$registered" -ne 1 ]; then
+    fail "real death setup: the fixture daemon never registered as this home's live daemon (test proves nothing)"
+  elif FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '. "$1"; daemon_lock_held_by_live_daemon' _ "$START"; then
+    fail "real death setup: the fixture daemon is somehow still alive after SIGTERM+wait (test proves nothing)"
+  elif FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 \
+    && [ -e "$st/state/.afk-daemon-died-unexpectedly" ] && [ ! -e "$st/state/.afk" ]; then
+    pass "stop: a daemon truly killed out-of-band (SIGTERM, no fm-afk-launch.sh involvement) is recorded on the next stop"
+  else
+    fail "stop: a daemon truly killed out-of-band left no durable record on the next stop"
   fi
   rm -rf "$st"
 }
@@ -976,6 +1016,7 @@ unit_native_start_refused
 unit_native_entry_refused
 unit_daemon_liveness_is_home_scoped
 unit_stop_records_unexpected_daemon_death
+unit_stop_records_death_of_a_really_killed_daemon
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed
