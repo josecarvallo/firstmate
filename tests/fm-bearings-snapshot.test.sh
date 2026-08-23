@@ -951,7 +951,7 @@ test_open_decision_surfaces_end_to_end() {
 # deadlocked behind their resolution. Away mode still ACTIVE refuses outright,
 # and every mutating path keeps using the strict guard.
 test_return_catchup_surfaces_prominently_and_report_proceeds() {
-  local home fakebin json toon rc
+  local home fakebin help json toon rc
   home=$(make_home return-catchup); write_fixture "$home"
   fakebin=$(make_fakebin "$home")
 
@@ -960,14 +960,29 @@ test_return_catchup_surfaces_prominently_and_report_proceeds() {
   printf '%s' "$json" | jq -e '.return_catchup_pending == false and (.return_catchup == [])' \
     >/dev/null || fail "a clear gate must report return_catchup_pending false: $json"
 
-  # A pending return catch-up must NOT refuse the read-only report.
-  printf 'schema\tfm-afk-return.v1\nphase\tblocked\nblocker\trepair-task\tsynthetic-dependency\tfirstmate can refresh the token\n' \
+  # A pending return catch-up must NOT refuse the read-only report. The persisted
+  # row is stale on purpose; the live status fold is the report's source.
+  fm_write_meta "$home/state/repair-task.meta" \
+    "window=firstmate:fm-repair-task" \
+    "worktree=$home/projects/ship-wt" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'blocked [key=synthetic-dependency]: firstmate can refresh the token\n' \
+    > "$home/state/repair-task.status"
+  printf 'schema\tfm-afk-return.v1\nphase\tblocked\nblocker\trepair-task\tstale-dependency\tstale persisted reason\n' \
     > "$home/state/.afk-return-catchup"
   json=$(run "$home" "$fakebin" --json) \
     || fail "a read-only report must proceed while catch-up is pending"
   printf '%s' "$json" | jq -e '
     .return_catchup_pending == true
-    and (.return_catchup | any(.[]; .id == "repair-task" and .key == "synthetic-dependency"))
+    and (.return_catchup | any(.[];
+      .kind == "blocker"
+      and .id == "repair-task"
+      and .key == "synthetic-dependency"
+      and (.reason | test("refresh the token"))))
+    and (.return_catchup | any(.[]; .key == "stale-dependency") | not)
   ' >/dev/null || fail "the pending blockers must be surfaced in the report: $json"
 
   # Prominence: the catch-up fields are the FIRST thing in the TOON report.
@@ -976,15 +991,36 @@ test_return_catchup_surfaces_prominently_and_report_proceeds() {
     'return_catchup_pending: true') : ;;
     *) fail "pending catch-up must be the first line of the report: $(printf '%s\n' "$toon" | head -1)" ;;
   esac
-  printf '%s\n' "$toon" | grep -Fq 'repair-task,synthetic-dependency' \
+  printf '%s\n' "$toon" | grep -Fq 'blocker,repair-task,synthetic-dependency' \
     || fail "the pending blocker must be listed prominently in the TOON report"
+
+  # A lifecycle-only gate still carries a non-empty reason in both model forms.
+  printf 'resolved [key=synthetic-dependency]: refreshed the token\n' \
+    >> "$home/state/repair-task.status"
+  printf 'schema\tfm-afk-return.v1\nphase\tblocked\nevidence\tlifecycle\taway-mode shutdown failed; lifecycle state preserved for retry\n' \
+    > "$home/state/.afk-return-catchup"
+  json=$(run "$home" "$fakebin" --json) \
+    || fail "a lifecycle-only report must proceed while catch-up is pending"
+  printf '%s' "$json" | jq -e '
+    .return_catchup_pending == true
+    and (.return_catchup | any(.[];
+      .kind == "lifecycle"
+      and .id == ""
+      and .key == ""
+      and (.reason | test("shutdown failed"))))
+  ' >/dev/null || fail "the lifecycle-only catch-up cause must be surfaced: $json"
+
+  help=$(run "$home" "$fakebin" --help) || fail "Bearings help should render"
+  assert_contains "$help" 'Default fields: return_catchup_pending, return_catchup{kind,id,key,reason}, schema,' \
+    "Bearings help did not document its leading machine fields"
 
   # Away mode still active refuses outright: not a return scenario.
   date +%s > "$home/state/.afk"
-  set +e
-  run "$home" "$fakebin" --json >/dev/null 2>&1
-  rc=$?
-  set -e
+  if run "$home" "$fakebin" --json >/dev/null 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
   [ "$rc" -ne 0 ] || fail "the report must still refuse while away mode is active"
   pass "read-only report proceeds through a pending catch-up and surfaces blockers prominently"
 }

@@ -164,6 +164,27 @@ test_return_gate_gates_mutation_passes_readonly_report_and_clears() {
   pass "return catch-up gates mutating work, lets a read-only report pass while surfacing the blocker, owns live blocker remediation, preserves evidence once, and clears idempotently"
 }
 
+test_report_guard_folds_current_blockers_without_mutation() {
+  local dir gate before help out
+  dir="$TMP_ROOT/report-current"
+  install_runner "$dir"
+  seed_live_blocker "$dir" tmux current-dependency
+  gate="$dir/home/state/.afk-return-catchup"
+  printf 'schema\tfm-afk-return.v1\nphase\tblocked\nblocker\trepair-task\tstale-dependency\tstale persisted reason\n' > "$gate"
+  before=$(cat "$gate")
+
+  out=$(run_return "$dir" report-guard) || fail "current report snapshot should proceed: $out"
+  assert_contains "$out" "blocker"$'\t'"repair-task"$'\t'"current-dependency" \
+    "report-guard did not freshly fold the live blocker"
+  assert_not_contains "$out" 'stale-dependency' \
+    "report-guard replayed a stale persisted blocker"
+  [ "$(cat "$gate")" = "$before" ] || fail "report-guard mutated the durable catch-up gate"
+  help=$(run_return "$dir" --help) || fail "AFK return help should render"
+  assert_contains "$help" 'fm-afk-return.sh report-guard' \
+    "AFK return help omitted the read-only report interface"
+  pass "report-guard freshly folds live blockers without mutating the gate"
+}
+
 test_explicit_reclassification_requires_durable_reason() {
   local backend dir out rc
   for backend in tmux herdr; do
@@ -282,6 +303,14 @@ test_check_retries_recorded_terminal_teardown() {
   [ -e "$dir/home/state/.afk-daemon-terminal" ] || fail "failed terminal teardown discarded its durable record"
   [ ! -e "$dir/home/state/.afk" ] || fail "failed terminal teardown did not preserve stop ordering"
 
+  out=$(run_return "$dir" report-guard) || fail "lifecycle-only report snapshot should proceed: $out"
+  case "$(printf '%s\n' "$out" | head -1)" in
+    pending) : ;;
+    *) fail "lifecycle-only report snapshot did not remain pending: $out" ;;
+  esac
+  assert_contains "$out" "lifecycle"$'\t'"away-mode shutdown failed" \
+    "lifecycle-only report snapshot did not surface why catch-up is pending"
+
   out=$(run_return "$dir" check) || fail "check did not retry recorded terminal teardown: $out"
   [ ! -e "$dir/home/state/.afk-daemon-terminal" ] || fail "successful check left the terminal teardown record behind"
   [ ! -e "$gate" ] || fail "successful terminal teardown retry left the return gate behind"
@@ -290,6 +319,7 @@ test_check_retries_recorded_terminal_teardown() {
 }
 
 test_return_gate_gates_mutation_passes_readonly_report_and_clears
+test_report_guard_folds_current_blockers_without_mutation
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain

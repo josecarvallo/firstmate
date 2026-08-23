@@ -17,9 +17,8 @@
 #
 # The status file must be the absolute parent route from the secondmate charter
 # (state/<id>.status under the PARENT home), never a path relative to this
-# secondmate home. Writing under the wrong home is detected as supporting
-# evidence by the parent pending-reply guard and does not acknowledge the
-# request.
+# secondmate home. That remains the wrong channel; fm-pending-reply-lib.sh's
+# "Local own-home report mirroring" section owns the exact-correlation fallback.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

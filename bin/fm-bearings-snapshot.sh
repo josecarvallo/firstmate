@@ -111,7 +111,8 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
+Default fields: return_catchup_pending, return_catchup{kind,id,key,reason}, schema,
+  home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
@@ -177,11 +178,22 @@ command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2
 CATCHUP_OUT=$("$SCRIPT_DIR/fm-afk-return.sh" report-guard) || exit $?
 if [ "${CATCHUP_OUT%%$'\n'*}" = pending ]; then
   RETURN_CATCHUP=$(printf '%s\n' "$CATCHUP_OUT" \
-    | awk -F'\t' 'NR>1 && $1=="blocker" {printf "%s\t%s\t%s\n", $2, $3, $4}' \
-    | jq -R -s -c '{pending:true, blockers:(split("\n")|map(select(length>0))|map(split("\t"))|map({id:.[0], key:.[1], summary:.[2]}))}') \
+    | jq -R -s -c '
+        {pending:true, items:(
+          split("\n")
+          | map(select(length > 0) | split("\t"))
+          | map(
+              if .[0] == "blocker" then
+                {kind:"blocker", id:.[1], key:.[2], reason:.[3]}
+              elif .[0] == "lifecycle" then
+                {kind:"lifecycle", id:"", key:"", reason:.[1]}
+              else empty
+              end
+            )
+        )}') \
     || { echo "fm-bearings-snapshot: return catch-up projection failed" >&2; exit 1; }
 else
-  RETURN_CATCHUP='{"pending":false,"blockers":[]}'
+  RETURN_CATCHUP='{"pending":false,"items":[]}'
 fi
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
@@ -516,7 +528,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
 # most prominent thing in either output form (captain direction 2026-08-22): the
 # read-only report proceeds, but never hides the blockers still holding the gate.
 MODEL=$(printf '%s' "$MODEL" | jq --argjson rc "$RETURN_CATCHUP" \
-  '{return_catchup_pending: $rc.pending, return_catchup: $rc.blockers} + .') \
+  '{return_catchup_pending: $rc.pending, return_catchup: $rc.items} + .') \
   || { echo "fm-bearings-snapshot: return catch-up projection failed" >&2; exit 1; }
 
 if [ "$FORMAT" = json ]; then

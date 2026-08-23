@@ -10,8 +10,8 @@
 #                             Read-only pass-through for a NON-MUTATING status
 #                             report: refuses only while away mode is still active,
 #                             but LETS a read-only report proceed while catch-up is
-#                             pending, printing the pending blockers so the report
-#                             can surface them prominently. See the read-only note.
+#                             pending, printing its current causes so the report can
+#                             surface them prominently. See the read-only note.
 #
 # `blocked:` is the crewmate protocol's firstmate-actionable verb. A live task's
 # open blocked event must be remediated and closed with `resolved [key=...]`, or
@@ -36,8 +36,11 @@
 #   1. Only the read-only report passes; every mutating path keeps using `guard`
 #      (or the begin/check gate) and stays blocked without exception.
 #   2. A report that passes MUST surface the pending blockers prominently; this
-#      command prints them (`pending` marker plus the durable blocker records) so
-#      the caller can render them, and hiding them would make the gate cosmetic.
+#      command prints a current snapshot so the caller can render them, and hiding
+#      them would make the gate cosmetic. Its stdout contract is `pending` followed
+#      by `blocker<TAB>id<TAB>key<TAB>reason` rows freshly folded from the live
+#      status streams and any `lifecycle<TAB>reason` rows that still explain the
+#      gate. A lifecycle-only gate always gets a non-empty lifecycle reason.
 #   3. The catch-up requirement itself is untouched: the gate still opens, still
 #      requires begin/check, and still blocks ordinary mutating work as before.
 # report-guard still refuses outright while away mode is ACTIVE (state/.afk), which
@@ -52,7 +55,7 @@ GATE="$STATE/.afk-return-catchup"
 LOCK="$STATE/.afk-return-catchup.lock"
 
 usage() {
-  sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 clean_field() {
@@ -163,19 +166,41 @@ return_guard() {
 }
 
 # Read-only pass-through for a NON-MUTATING status report (see the header note).
-# Refuses only while away mode is ACTIVE. While catch-up is pending it prints a
-# `pending` marker followed by the durable blocker records and returns 0, so the
-# caller can proceed AND surface the pending blockers prominently. Prints `clear`
-# and returns 0 when nothing is pending. Never mutates state; like `guard` it does
-# not source fm-wake-lib.sh, so it stays a literal read-only entrypoint.
+# Refuses only while away mode is ACTIVE. While catch-up is pending it prints the
+# current snapshot defined in the header and returns 0, so the caller can proceed
+# AND surface what still holds the gate prominently. Prints `clear` and returns 0
+# when nothing is pending. Never mutates state or sources fm-wake-lib.sh; its one
+# sourced classifier path uses only the pure whole-file status fold.
 report_guard() {
+  local blockers lifecycle phase
   if [ -e "$STATE/.afk" ]; then
     printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
     return 3
   fi
   if [ -e "$GATE" ]; then
+    # shellcheck source=bin/fm-classify-lib.sh
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/fm-classify-lib.sh"
+    blockers=$(scan_open_blockers)
+    lifecycle=$(awk -F '\t' '
+      $1 == "evidence" && $2 == "lifecycle" && $3 != "" && !seen[$3]++ {
+        print "lifecycle\t" $3
+      }
+    ' "$GATE" 2>/dev/null || true)
+    if [ -z "$blockers" ] && [ -z "$lifecycle" ]; then
+      phase=$(awk -F '\t' '$1 == "phase" { print $2; exit }' "$GATE" 2>/dev/null || true)
+      case "$phase" in
+        stopping-and-draining)
+          lifecycle=$'lifecycle\taway-mode return catch-up has not completed lifecycle reconciliation'
+          ;;
+        *)
+          lifecycle=$'lifecycle\treturn catch-up remains pending until bin/fm-afk-return.sh check completes'
+          ;;
+      esac
+    fi
     printf 'pending\n'
-    grep '^blocker'$'\t' "$GATE" 2>/dev/null || true
+    [ -z "$blockers" ] || printf '%s\n' "$blockers"
+    [ -z "$lifecycle" ] || printf '%s\n' "$lifecycle"
     return 0
   fi
   printf 'clear\n'
