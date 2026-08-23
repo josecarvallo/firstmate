@@ -1,0 +1,35 @@
+SCENARIO 1 — unsupported native entries refuse before writing away state
+direct entry rc=1
+afk: refusing a direct/native background entry without FM_AFK_STATE_PREPARED=0 from the supported launcher - it is not verified to survive the harness's own session/task teardown and the daemon can be SIGTERM'd silently; run bin/fm-afk-launch.sh start instead, which launches a detached terminal that outlives this session
+direct entry wrote .afk: no
+start-native rc=1
+fm-afk-launch: start-native is refused: no harness's in-pane background tool is verified to survive session/task teardown (the daemon can be SIGTERM'd silently) - run 'bin/fm-afk-launch.sh start' instead, for every harness
+start-native wrote terminal record: no
+
+SCENARIO 2 — supported start owns a real detached tmux terminal
+supported start rc=0
+fm-afk-launch: daemon launched in detached tmux session 'fm-afk-daemon-4009312674-75446-9503-1787491117', supervising %0
+recorded backend=tmux
+detached terminal alive after launcher returned: yes
+captain pane count unchanged: 1 -> 1
+stop removed exact detached terminal: yes
+stop cleared .afk and terminal record: yes
+
+SCENARIO 3 — a same-named daemon from another home is not this home's daemon
+stop rc=0
+fm-afk-launch: away-mode daemon was not running while away mode was active; away mode may have been unsupervised since it exited
+fm-afk-launch: away mode stopped; daemon terminal torn down and .afk cleared
+foreign same-named process still alive: yes
+this home recorded missing supervision: yes
+
+SCENARIO 4 — out-of-band SIGTERM becomes catch-up evidence and is consumed after publication
+registered as live before external SIGTERM: yes
+stop after external SIGTERM rc=0
+fm-afk-launch: away-mode daemon was not running while away mode was active; away mode may have been unsupervised since it exited
+fm-afk-launch: away mode stopped; daemon terminal torn down and .afk cleared
+durable death marker exists before return: yes
+return rc=0
+catch-up unsupervised: the away-mode daemon exited on its own before this return - away mode may have been unsupervised for an unknown period
+fm-afk-return: catch-up clear; ordinary captain work may proceed
+death marker consumed after catch-up publication: yes
+ordinary work cleared: yes
