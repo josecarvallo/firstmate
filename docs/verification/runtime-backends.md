@@ -608,6 +608,21 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+### Native in-pane background daemon launch is not verified, and is refused
+
+Reproduced 2026-08-23: `bin/fm-afk-start.sh` execed via a harness's own native in-pane tracked-background tool (Claude's, through this same repo's own background-bash mechanism) received SIGTERM from that harness's own background-task teardown primitive (its task-stop control) and exited, while `state/.afk` stayed present with nothing left to notice.
+`pgrep -f fm-supervise-daemon` still answered "alive" because a sibling home's own daemon process shares that basename, the exact false positive `daemon_pid_matches`'s command-line fallback in `bin/fm-afk-start.sh` used to accept before this fix (it now only matches this home's own absolute `$FM_AFK_DAEMON` path).
+`tests/fm-afk-launch.test.sh`'s `unit_daemon_liveness_is_home_scoped` pins that home-scoping with a live same-basename process from a different `bin/` directory.
+
+No harness has verification evidence that its own native background mechanism survives that harness's own session/task teardown, so `bin/fm-afk-launch.sh start-native` and `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` both refuse unconditionally now, naming `bin/fm-afk-launch.sh start` (the one verified path, covered by the e2e topology tests above) in their refusal message.
+`tests/fm-afk-launch.test.sh`'s `unit_native_start_refused` and `unit_native_entry_refused` cover the refusal.
+`unit_stop_records_unexpected_daemon_death` and `tests/fm-afk-return.test.sh`'s `test_daemon_died_unexpectedly_surfaces_without_blocking` cover `state/.afk-daemon-died-unexpectedly`, the durable marker `bin/fm-afk-launch.sh stop` now writes when it finds away mode active with no live daemon holding this home's lock, and that `bin/fm-afk-return.sh` surfaces in the captain's return catch-up digest.
+
+```sh
+bash tests/fm-afk-launch.test.sh
+bash tests/fm-afk-return.test.sh
+```
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

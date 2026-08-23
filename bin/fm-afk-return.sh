@@ -154,6 +154,19 @@ return_reconcile() {
     fi
   fi
 
+  # The daemon can exit on its own well before the captain returns (see
+  # fm_afk_launch_stop in bin/fm-afk-launch.sh); that leaves an unsupervised
+  # away-mode stretch of unknown length. Unlike a live blocker there is no
+  # retry that resolves this - the daemon is already gone - so it is
+  # surfaced as evidence in the normal catch-up digest (print_evidence, always
+  # shown before "catch-up clear") rather than left as a gate nothing can
+  # close. rm below (not clear_delivery_artifacts) so it is consumed exactly
+  # once it has actually been shown.
+  if [ -e "$STATE/.afk-daemon-died-unexpectedly" ]; then
+    append_evidence unsupervised 'the away-mode daemon exited on its own before this return - away mode may have been unsupervised for an unknown period' "$evidence"
+    rm -f "$STATE/.afk-daemon-died-unexpectedly"
+  fi
+
   drained=$("$SCRIPT_DIR/fm-wake-drain.sh" 2> "$drain_err") || {
     append_evidence lifecycle 'durable wake drain failed; retry catch-up before ordinary work' "$evidence"
     lifecycle_ok=0

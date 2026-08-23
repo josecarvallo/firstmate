@@ -241,7 +241,7 @@ test_away_reentry_refuses_pending_return_gate() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config"
   printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$dir/home/state/.afk-return-catchup"
   set +e
-  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-afk-launch.sh" start-native 2>&1)
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-afk-launch.sh" start 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "away re-entry succeeded while return catch-up was pending"
@@ -275,9 +275,34 @@ test_check_retries_recorded_terminal_teardown() {
   pass "check retries recorded terminal teardown and keeps catch-up gated until success"
 }
 
+test_daemon_died_unexpectedly_surfaces_without_blocking() {
+  local dir out rc
+  dir="$TMP_ROOT/daemon-died-unexpectedly"
+  install_runner "$dir"
+  date +%s > "$dir/home/state/.afk"
+  # Simulates bin/fm-afk-launch.sh stop having already recorded this (the
+  # daemon exited on its own, e.g. SIGTERM'd by its own harness's
+  # background-task teardown, before the captain's return reached it) - the
+  # marker's mere presence is what fm-afk-return.sh reacts to, regardless of
+  # which stop implementation wrote it.
+  : > "$dir/home/state/.afk-daemon-died-unexpectedly"
+
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "an already-dead daemon should not block catch-up the way a live blocker does (rc=$rc): $out"
+  assert_contains "$out" 'catch-up clear' "ordinary work was not cleared to proceed"
+  assert_contains "$out" 'catch-up unsupervised: the away-mode daemon exited on its own before this return' \
+    "the unexpected daemon death was not surfaced in the catch-up digest"
+  [ ! -e "$dir/home/state/.afk-daemon-died-unexpectedly" ] || fail "the unexpected-death marker was not consumed after being surfaced"
+  pass "an unexpectedly-dead away-mode daemon is surfaced as catch-up evidence without gating ordinary work"
+}
+
 test_return_gate_orders_catchup_before_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain
 test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
+test_daemon_died_unexpectedly_surfaces_without_blocking

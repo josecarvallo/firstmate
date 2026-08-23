@@ -483,43 +483,93 @@ unit_tmux_absence_distinguishes_probe_failure() {
   rm -rf "$st"
 }
 
-unit_native_lifecycle() {
-  local st
+unit_native_start_refused() {
+  local st out status
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
   mkdir -p "$st/state"
-  : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
-    && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
-    && [ -e "$st/state/.afk" ] \
-    && [ ! -e "$st/state/.subsuper-escalations" ]; then
-    pass "native lifecycle: launcher owns state with no terminal"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ] \
+    && [ ! -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && printf '%s' "$out" | grep -q 'bin/fm-afk-launch.sh start'; then
+    pass "native start: start-native refuses, names the verified path, and writes no state"
   else
-    fail "native lifecycle: state preparation or no-terminal record failed"
-  fi
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
-  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
-    pass "native lifecycle: uniform stop clears state without closing a terminal"
-  else
-    fail "native lifecycle: uniform stop retained state"
+    fail "native start: start-native did not refuse cleanly (status=$status; output: $out)"
   fi
   rm -rf "$st"
 }
 
-unit_native_entry_preserves_prepared_state() {
-  local st
+unit_native_entry_refused() {
+  local st out status
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-entry.XXXXXX")
   mkdir -p "$st/state"
-  : > "$st/state/.afk"
-  : > "$st/state/.subsuper-escalations"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 bash -c '
-    . "$1"
-    FM_AFK_DAEMON=/bin/true
-    fm_afk_start_main
-  ' _ "$START" >/dev/null 2>&1
-  if [ -e "$st/state/.afk" ] && [ -e "$st/state/.subsuper-escalations" ]; then
-    pass "native entry: launcher-prepared lifecycle state is not rewritten"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 "$START" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ] \
+    && [ ! -e "$st/state/.afk" ] \
+    && printf '%s' "$out" | grep -q 'bin/fm-afk-launch.sh start'; then
+    pass "native entry: FM_AFK_STATE_PREPARED=1 refuses and names the verified path"
   else
-    fail "native entry: launcher-prepared lifecycle state was mutated"
+    fail "native entry: FM_AFK_STATE_PREPARED=1 did not refuse cleanly (status=$status; output: $out)"
+  fi
+  rm -rf "$st"
+}
+
+# The reproduced false positive: a bare basename match on the daemon script
+# ("*fm-supervise-daemon.sh*", equivalent to `pgrep -f fm-supervise-daemon`)
+# says "alive" for ANY home's daemon process, not just this home's. A fake
+# daemon under a DIFFERENT bin/ directory (a stand-in for a sibling
+# secondmate's own checkout) is alive and matches that bare pattern, but must
+# not satisfy this home's liveness check when its lock has no recorded
+# identity (the fallback path in daemon_pid_matches).
+unit_daemon_liveness_is_home_scoped() {
+  local st other_bin other_daemon other_pid old_style_verdict
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-home-scope.XXXXXX")
+  other_bin=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-other-home-bin.XXXXXX")
+  mkdir -p "$st/state" "$other_bin"
+  other_daemon="$other_bin/fm-supervise-daemon.sh"
+  printf '#!/usr/bin/env bash\nwhile :; do sleep 0.2; done\n' > "$other_daemon"
+  chmod +x "$other_daemon"
+  "$other_daemon" &
+  other_pid=$!
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  printf '%s' "$other_pid" > "$st/state/.supervise-daemon.lock/pid"
+  # No pid-identity file: this home's lock never recorded one, forcing the
+  # command-line fallback daemon_pid_matches uses.
+  old_style_verdict=0
+  case "$(ps -p "$other_pid" -o command= 2>/dev/null || true)" in
+    *"fm-supervise-daemon.sh"*) old_style_verdict=1 ;;
+  esac
+  if [ "$old_style_verdict" -eq 1 ] && FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    ! daemon_lock_held_by_live_daemon
+  ' _ "$START"; then
+    pass "daemon liveness: home-scoped check rejects a live same-basename process from another home's bin/"
+  else
+    fail "daemon liveness: a foreign home's same-named daemon satisfied this home's liveness check"
+  fi
+  kill "$other_pid" 2>/dev/null || true
+  wait "$other_pid" 2>/dev/null || true
+  rm -rf "$st" "$other_bin"
+}
+
+# fm_afk_launch_stop must not treat "the daemon already exited on its own" the
+# same as "I successfully stopped a running daemon" - the away-mode flag was
+# active with nobody supervising it, and that must stay visible even though
+# nothing is left alive to report it directly (the reproduced defect this
+# brief fixes: a native-launched daemon SIGTERM'd by its own harness leaves
+# exactly this state).
+unit_stop_records_unexpected_daemon_death() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-unexpected-death.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  if [ -e "$st/state/.afk-daemon-died-unexpectedly" ] && [ ! -e "$st/state/.afk" ]; then
+    pass "stop: an already-dead daemon while away mode was active is recorded, not silently accepted"
+  else
+    fail "stop: an already-dead daemon while away mode was active left no durable record"
   fi
   rm -rf "$st"
 }
@@ -743,7 +793,7 @@ unit_refresh_validates_record() {
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=tmux bash -c '
       . "$1"
-      ! fm_afk_launch_start && ! fm_afk_launch_start_native
+      ! fm_afk_launch_start
     ' _ "$LAUNCH" && [ ! -e "$st/state/.afk" ]; then
     pass "refresh record: malformed terminal identity fails closed"
   else
@@ -751,24 +801,6 @@ unit_refresh_validates_record() {
   fi
   kill "$daemon_pid" 2>/dev/null || true
   wait "$daemon_pid" 2>/dev/null || true
-  rm -rf "$st"
-}
-
-unit_clear_failure_aborts_entry() {
-  local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear-fail.XXXXXX")
-  mkdir -p "$st/state"
-  : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
-    . "$1"
-    fm_afk_launch_reconcile() { return 0; }
-    fm_afk_clear_stale_artifacts() { return 1; }
-    ! fm_afk_launch_start_native
-  ' _ "$LAUNCH" && [ ! -e "$st/state/.afk" ] && [ -e "$st/state/.subsuper-escalations" ]; then
-    pass "clear failure: native entry aborts and restores prior state"
-  else
-    fail "clear failure: native entry proceeded or lost prior state"
-  fi
   rm -rf "$st"
 }
 
@@ -812,10 +844,11 @@ unit_flag_write_failure_aborts() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-flag-fail.XXXXXX")
   mkdir -p "$st/state"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=tmux bash -c '
     . "$1"
     fm_afk_launch_flag_write() { return 1; }
-    ! fm_afk_launch_start_native
+    ! fm_afk_launch_start
   ' _ "$LAUNCH"
   if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
     pass "flag failure: lifecycle aborts without active state"
@@ -939,8 +972,10 @@ unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
-unit_native_lifecycle
-unit_native_entry_preserves_prepared_state
+unit_native_start_refused
+unit_native_entry_refused
+unit_daemon_liveness_is_home_scoped
+unit_stop_records_unexpected_daemon_death
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed
@@ -951,7 +986,6 @@ unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
 unit_refresh_validates_record
-unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts
