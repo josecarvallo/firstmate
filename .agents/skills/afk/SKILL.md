@@ -33,8 +33,8 @@ batched digest rather than per-wake injections.
    pane** (`herdr pane split`): a split co-tenants the tab and visibly shrinks
    the captain's pane (docs/herdr-backend.md "Away-mode supervisor support").
    Never run `bin/fm-afk-start.sh` directly through a harness's own in-pane
-   tracked-background tool (`start-native` / `FM_AFK_STATE_PREPARED=1`): both
-   refuse now, because no harness has verification evidence that its
+   tracked-background tool: it and `start-native` refuse now, because no
+   harness has verification evidence that its
    background job survives that harness's own session/task teardown -
    reproduced 2026-08-23 for Claude's, where the daemon received SIGTERM from
    the harness's own background-task lifecycle management and exited while

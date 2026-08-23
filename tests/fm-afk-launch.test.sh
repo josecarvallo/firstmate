@@ -123,7 +123,7 @@ unit_relative_paths_are_absolute_before_daemon_launch() {
 # current session's buffered escalations.
 # ---------------------------------------------------------------------------
 unit_fresh_vs_refresh() {
-  local st sleep_pid lock
+  local st sleep_pid lock out
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
@@ -136,8 +136,10 @@ unit_fresh_vs_refresh() {
   mkdir -p "$lock"
   printf '%s' "$sleep_pid" > "$lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$START" >/dev/null 2>&1
-  if [ -e "$st/state/.subsuper-escalations" ] && [ -e "$st/state/.subsuper-inject-wedged" ]; then
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=0 "$START" 2>&1)
+  if [ -e "$st/state/.subsuper-escalations" ] \
+    && [ -e "$st/state/.subsuper-inject-wedged" ] \
+    && printf '%s\n' "$out" | grep -F 'daemon already running' >/dev/null; then
     pass "refresh: daemon already alive - stale artifacts preserved (current session's buffer kept)"
   else
     fail "refresh: incorrectly cleared the current session's buffered escalations"
@@ -537,18 +539,27 @@ unit_native_start_refused() {
 }
 
 unit_native_entry_refused() {
-  local st out status
+  local st out status sentinel
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-entry.XXXXXX")
   mkdir -p "$st/state"
-  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 "$START" 2>&1)
-  status=$?
-  if [ "$status" -ne 0 ] \
-    && [ ! -e "$st/state/.afk" ] \
-    && printf '%s' "$out" | grep -q 'bin/fm-afk-launch.sh start'; then
-    pass "native entry: FM_AFK_STATE_PREPARED=1 refuses and names the verified path"
-  else
-    fail "native entry: FM_AFK_STATE_PREPARED=1 did not refuse cleanly (status=$status; output: $out)"
-  fi
+  for sentinel in unset 1 invalid; do
+    if [ "$sentinel" = unset ]; then
+      out=$(env -u FM_AFK_STATE_PREPARED FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+        FM_SUPERVISOR_BACKEND=unsupported "$START" 2>&1)
+    else
+      out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED="$sentinel" \
+        FM_SUPERVISOR_BACKEND=unsupported "$START" 2>&1)
+    fi
+    status=$?
+    if [ "$status" -ne 0 ] \
+      && [ ! -e "$st/state/.afk" ] \
+      && printf '%s' "$out" | grep -q 'bin/fm-afk-launch.sh start'; then
+      pass "native entry: sentinel '$sentinel' refuses and names the verified path"
+    else
+      fail "native entry: sentinel '$sentinel' did not refuse cleanly (status=$status; output: $out)"
+      rm -f "$st/state/.afk"
+    fi
+  done
   rm -rf "$st"
 }
 

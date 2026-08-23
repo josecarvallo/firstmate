@@ -9,11 +9,10 @@
 #     - otherwise clears any prior away session's stale escalation artifacts
 #       (fm_afk_clear_stale_artifacts), then execs bin/fm-supervise-daemon.sh
 #       in the foreground.
-#   FM_AFK_STATE_PREPARED=1 REFUSES instead of running (fm_afk_start_refuse_native
-#   below): it named a harness's own in-pane tracked-background tool as this
-#   entry's caller, and that path has no verification evidence that the daemon
-#   survives the harness's own session/task teardown - see that function for
-#   the reproduced failure. Always launch through bin/fm-afk-launch.sh start.
+#   FM_AFK_STATE_PREPARED=0 is required as proof that bin/fm-afk-launch.sh
+#   created the detached terminal. Every other entry context refuses through
+#   fm_afk_start_refuse_native below. Always launch through
+#   bin/fm-afk-launch.sh start.
 #
 # This file is sourceable: its BASH_SOURCE guard keeps main from running, while
 # exposing the daemon-lock helpers and fm_afk_clear_stale_artifacts. Sourcing it
@@ -44,8 +43,9 @@ fm_afk_start_usage() {
   sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-# fm_afk_start_refuse_native: the FM_AFK_STATE_PREPARED=1 entry (a harness's own
-# in-pane tracked-background tool, e.g. Claude's or Grok's background-bash/task
+# fm_afk_start_refuse_native: an entry without the launcher's explicit
+# FM_AFK_STATE_PREPARED=0 proof (including a harness's own in-pane
+# tracked-background tool, e.g. Claude's or Grok's background-bash/task
 # feature) is refused rather than accepted-and-silently-dying. Reproduced
 # 2026-08-23: a daemon started this way received SIGTERM from the harness's own
 # background-task lifecycle management (observed via that harness's task-stop
@@ -59,7 +59,7 @@ fm_afk_start_usage() {
 # dedicated Herdr daemon workspace topology"). See docs/herdr-backend.md
 # "Away-mode supervisor support" for the full rationale.
 fm_afk_start_refuse_native() {
-  echo "afk: refusing the native in-pane background path (FM_AFK_STATE_PREPARED=1) - it is not verified to survive the harness's own session/task teardown and the daemon can be SIGTERM'd silently; run bin/fm-afk-launch.sh start instead, which launches a detached terminal that outlives this session" >&2
+  echo "afk: refusing a direct/native background entry without FM_AFK_STATE_PREPARED=0 from the supported launcher - it is not verified to survive the harness's own session/task teardown and the daemon can be SIGTERM'd silently; run bin/fm-afk-launch.sh start instead, which launches a detached terminal that outlives this session" >&2
 }
 
 # fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
@@ -162,7 +162,7 @@ fm_afk_start_main() {
     * ) echo "usage: $(basename "${BASH_SOURCE[1]:-fm-afk-start.sh}")" >&2; return 2 ;;
   esac
 
-  if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
+  if [ "${FM_AFK_STATE_PREPARED:-}" != 0 ]; then
     fm_afk_start_refuse_native
     return 1
   fi
@@ -183,9 +183,7 @@ fm_afk_start_main() {
 
   # Fresh start: clear the previous away session's stale delivery artifacts
   # before the new daemon can surface them (fix for the leaked-artifact defect).
-  if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
-    fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
-  fi
+  fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
 
   echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
   exec "$FM_AFK_DAEMON"

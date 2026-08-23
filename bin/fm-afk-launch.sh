@@ -558,8 +558,8 @@ fm_afk_launch_start() {
 # harness's own session/task teardown - see fm_afk_start_refuse_native in
 # bin/fm-afk-start.sh for the reproduced failure this replaces. `start` is the
 # one verified path, for every harness; it makes no state change here to
-# refuse, so a caller that mistakenly still tries the removed
-# FM_AFK_STATE_PREPARED=1 entry next finds no prepared state to act on either.
+# refuse, and the daemon entry separately requires the detached launcher's
+# explicit environment proof.
 fm_afk_launch_start_native() {
   fm_afk_launch_log "start-native is refused: no harness's in-pane background tool is verified to survive session/task teardown (the daemon can be SIGTERM'd silently) - run 'bin/fm-afk-launch.sh start' instead, for every harness"
   return 1
