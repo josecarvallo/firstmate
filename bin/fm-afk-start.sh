@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Enter away mode and run the sub-supervisor daemon in a harness-tracked
-# foreground process when one is not already alive.
+# Launcher-only entry that runs the sub-supervisor daemon in the foreground of
+# its detached terminal when one is not already alive.
 #
 # Usage: fm-afk-start.sh
 #   Sets state/.afk, checks state/.supervise-daemon.lock, and:
@@ -46,18 +46,10 @@ fm_afk_start_usage() {
 # fm_afk_start_refuse_native: an entry without the launcher's explicit
 # FM_AFK_STATE_PREPARED=0 proof (including a harness's own in-pane
 # tracked-background tool, e.g. Claude's or Grok's background-bash/task
-# feature) is refused rather than accepted-and-silently-dying. Reproduced
-# 2026-08-23: a daemon started this way received SIGTERM from the harness's own
-# background-task lifecycle management (observed via that harness's task-stop
-# primitive) and exited, while state/.afk stayed present with nothing left to
-# notice - away mode looked active with no supervisor running. The
-# terminal-backed path (bin/fm-afk-launch.sh start) launches a detached herdr
-# workspace or tmux session that is not a child of the harness's own process
-# tree, so it is not torn down by that harness's session/task lifecycle; that
-# is the only path this repo has verification evidence for
-# (tests/fm-afk-launch.test.sh; docs/verification/runtime-backends.md "The
-# dedicated Herdr daemon workspace topology"). See docs/herdr-backend.md
-# "Away-mode supervisor support" for the full rationale.
+# feature) is refused rather than accepted without a verified survival
+# contract. The detached-launch requirement and evidence are owned by
+# docs/herdr-backend.md "Away-mode supervisor support" and its linked
+# maintainer-verification record.
 fm_afk_start_refuse_native() {
   echo "afk: refusing a direct/native background entry without FM_AFK_STATE_PREPARED=0 from the supported launcher - it is not verified to survive the harness's own session/task teardown and the daemon can be SIGTERM'd silently; run bin/fm-afk-launch.sh start instead, which launches a detached terminal that outlives this session" >&2
 }

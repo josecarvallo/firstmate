@@ -24,29 +24,13 @@ batched digest rather than per-wake injections.
    The flag survives a firstmate restart, so recovery re-enters afk when it is present.
 
 2. **Ensure the sub-supervisor daemon is running as a tracked background process.**
-   For every harness, run `bin/fm-afk-launch.sh start`. It is the single owner
-   of the daemon terminal: it creates a NON-VISIBLE tracked terminal for the
-   current backend (a herdr dedicated `--no-focus` workspace, a detached tmux
-   session), records its exact id, and passes the captain pane in as
-   `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its own
-   new pane. **Never manufacture a terminal by splitting the captain's active
-   pane** (`herdr pane split`): a split co-tenants the tab and visibly shrinks
-   the captain's pane (docs/herdr-backend.md "Away-mode supervisor support").
-   Never run `bin/fm-afk-start.sh` directly through a harness's own in-pane
-   tracked-background tool: it and `start-native` refuse now, because no
-   harness has verification evidence that its
-   background job survives that harness's own session/task teardown -
-   reproduced 2026-08-23 for Claude's, where the daemon received SIGTERM from
-   the harness's own background-task lifecycle management and exited while
-   `state/.afk` stayed present with nothing left to notice.
-   `bin/fm-afk-start.sh` is the daemon entry the launcher execs inside that new
-   terminal: it exits immediately if the identity-backed daemon lock already
-   names a live process, otherwise it execs `bin/fm-supervise-daemon.sh` in the
-   foreground. The daemon is **presence-gated**: it injects escalations only
-   while `state/.afk` exists, and stays quiet otherwise.
-   If the daemon exited on its own before the captain returns, `bin/fm-afk-return.sh`
-   surfaces that as catch-up evidence (`state/.afk-daemon-died-unexpectedly`) rather
-   than silently treating it as an ordinary stop.
+   For every harness, run `bin/fm-afk-launch.sh start`.
+   It is the single owner of the daemon terminal: it creates a NON-VISIBLE tracked terminal for a supported backend (a Herdr dedicated `--no-focus` workspace or a detached tmux session), records its exact id, and passes the captain pane in as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain rather than its own new pane.
+   **Never manufacture a terminal by splitting the captain's active pane** (`herdr pane split`): a split co-tenants the tab and visibly shrinks the captain's pane.
+   Never run `bin/fm-afk-start.sh` directly through a harness's own in-pane tracked-background tool; direct entry and `start-native` refuse, and the current support rationale lives in [`docs/herdr-backend.md`](../../../docs/herdr-backend.md#away-mode-supervisor-support).
+   `bin/fm-afk-start.sh` is the launcher-only daemon entry inside the new terminal: it exits immediately if the identity-backed daemon lock already names a live process, otherwise it execs `bin/fm-supervise-daemon.sh` in the foreground.
+   The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists and stays quiet otherwise.
+   If the launcher detects that the daemon exited while away mode was active, `bin/fm-afk-return.sh` surfaces the durable evidence during catch-up rather than treating it as an ordinary stop.
 
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.

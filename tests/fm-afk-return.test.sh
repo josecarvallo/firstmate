@@ -284,11 +284,9 @@ test_daemon_died_unexpectedly_surfaces_without_blocking() {
   dir="$TMP_ROOT/daemon-died-unexpectedly"
   install_runner "$dir"
   date +%s > "$dir/home/state/.afk"
-  # Simulates bin/fm-afk-launch.sh stop having already recorded this (the
-  # daemon exited on its own, e.g. SIGTERM'd by its own harness's
-  # background-task teardown, before the captain's return reached it) - the
-  # marker's mere presence is what fm-afk-return.sh reacts to, regardless of
-  # which stop implementation wrote it.
+  # Simulates a launcher death-detection boundary having recorded that the
+  # daemon exited before the captain returned. Marker presence is what
+  # fm-afk-return.sh reacts to, regardless of which launcher path wrote it.
   : > "$dir/home/state/.afk-daemon-died-unexpectedly"
 
   set +e

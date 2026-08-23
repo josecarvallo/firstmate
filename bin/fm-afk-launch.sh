@@ -1,61 +1,37 @@
 #!/usr/bin/env bash
-# fm-afk-launch.sh - the single owner of the away-mode daemon TERMINAL lifecycle:
-# launch it in a NON-VISIBLE tracked terminal per backend, record its exact id,
-# tear it down by that exact id, and reconcile a leaked one after a crash.
+# fm-afk-launch.sh - own the away-mode daemon terminal lifecycle by exact id.
 #
-# Why this exists (docs/herdr-backend.md "Away-mode supervisor support"):
-# bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
-# terminal it is already in. No harness has verification evidence that its own
-# in-pane tracked-background tool survives that harness's own session/task
-# teardown (reproduced 2026-08-23 for Claude's: the daemon received SIGTERM
-# from the harness's own background-task lifecycle management and exited,
-# while state/.afk stayed present and nothing noticed), so `start-native`
-# below always refuses. Every harness manufactures a terminal here instead,
-# and doing that by SPLITTING the captain's active pane visibly shrinks it -
-# the regression this script fixes. Instead this creates a non-visible tracked
-# terminal (a herdr tab/workspace with --no-focus, or a detached tmux session)
-# that never touches the captain's active tab, and NEVER uses shell `&` (which
-# herdr/codex can reap) - and, being no child of the harness's own process
-# tree, is not torn down by that harness's session/task lifecycle either.
+# Harness-native background jobs have no verified survival contract across
+# their own session/task teardown, so `start-native` refuses. This launcher
+# creates a non-visible Herdr workspace or detached tmux session without
+# splitting the captain's active pane or using shell `&`.
 #
-# Correct supervisor targeting: the daemon finds the captain pane to inject into
-# from its OWN inherited env (discover_supervisor_target). Running it in a
-# separate terminal would make it discover its OWN pane, so this captures the
-# captain pane FIRST (from the pane this script runs in) and passes it in as
-# FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
+# The launcher captures the captain target before creating the daemon terminal
+# and passes FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly so the daemon
+# injects into the captain rather than discovering its own new pane.
 #
 # Usage:
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
-#                              is already running) launch the daemon in a fresh
-#                              non-visible terminal for the detected backend and
-#                              record it. Idempotent: an already-running daemon
-#                              with a verified live Herdr/tmux terminal refreshes
-#                              state/.afk; a recorded-but-dead terminal is
-#                              reconciled (closed by id) first.
+#                              is already running in a verified live Herdr/tmux
+#                              terminal) launch and record a fresh non-visible
+#                              terminal; reconcile a recorded dead terminal first.
 #   fm-afk-launch.sh start-native
-#                              REFUSES (see above): no harness's in-pane
-#                              tracked-background tool has survival evidence
-#                              across that harness's own session/task
-#                              teardown. Use `start` instead, for every harness.
+#                              REFUSES; use `start` for every harness.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
-#                              id, then clear state/.afk last. If state/.afk was
-#                              present but no live daemon held the lock (it
-#                              already died on its own), records
-#                              state/.afk-daemon-died-unexpectedly instead of
-#                              silently treating that as an ordinary stop -
-#                              bin/fm-afk-return.sh surfaces it to the captain.
+#                              id, and clear state/.afk last; persist unexpected
+#                              prior daemon death for return catch-up.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
+# See docs/herdr-backend.md "Away-mode supervisor support" for the contract and
+# its linked dated verification evidence.
 #
-# Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
-# terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
-# placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
-# override the captured captain pane/backend (an isolated lab pane in tests).
+# Test seam: FM_AFK_LAUNCH_ENTRY replaces the detached command for topology tests.
+# FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND override the captured captain target.
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -601,13 +577,10 @@ fm_afk_launch_start() {
   return "$result"
 }
 
-# fm_afk_launch_start_native: ALWAYS refuses. No harness's own in-pane
-# tracked-background tool has verification evidence that it survives that
-# harness's own session/task teardown - see fm_afk_start_refuse_native in
-# bin/fm-afk-start.sh for the reproduced failure this replaces. `start` is the
-# one verified path, for every harness; it makes no state change here to
-# refuse, and the daemon entry separately requires the detached launcher's
-# explicit environment proof.
+# fm_afk_launch_start_native: ALWAYS refuses under the support contract in
+# docs/herdr-backend.md "Away-mode supervisor support". `start` is the one
+# verified path for every harness; refusal makes no state change, and the daemon
+# entry separately requires the detached launcher's explicit environment proof.
 fm_afk_launch_start_native() {
   fm_afk_launch_log "start-native is refused: no harness's in-pane background tool is verified to survive session/task teardown (the daemon can be SIGTERM'd silently) - run 'bin/fm-afk-launch.sh start' instead, for every harness"
   return 1
@@ -638,15 +611,10 @@ fm_afk_launch_stop() {
     pid=$(daemon_lock_pid 2>/dev/null) || return 1
     pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   elif [ "$afk_was_active" -eq 1 ]; then
-    # Away mode was active but no live process holds this home's daemon lock:
-    # the daemon exited on its own sometime before this stop was requested
-    # (e.g. SIGTERM'd by its own harness's background-task teardown - see
-    # fm_afk_start_refuse_native in bin/fm-afk-start.sh). Record it as a
-    # distinct, durable fact rather than silently treating "nothing to stop"
-    # the same as "I successfully stopped a running daemon": an unsupervised
-    # away-mode stretch must stay visible even when nobody was there to see it
-    # happen. bin/fm-afk-return.sh reads this marker and surfaces it in the
-    # captain's return catch-up digest.
+    # Away mode was active but no live process holds this home's daemon lock,
+    # so the daemon exited before this stop. Record that distinct durable fact
+    # rather than treating "nothing to stop" as a successful ordinary stop;
+    # bin/fm-afk-return.sh surfaces the unsupervised stretch during catch-up.
     fm_afk_launch_record_unexpected_death || return 1
   fi
   if [ -n "$pid" ]; then
