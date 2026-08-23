@@ -1,0 +1,39 @@
+FIRSTMATE PARENT-CHANNEL END-TO-END EVIDENCE
+Scenario: a secondmate originates an uncorrelated keyed escalation, then answers its worker with fm-send --resolve-key.
+
+$ fm-secondmate-report.sh --escalate needs-decision --key real-money-review "worker found a real-money risk"
+escalated to /var/folders/q8/syy2n6811js_fff1n_ytff680000gn/T/tmp.7x5Pp5nxpZ/parent/state/amplifica.status
+
+Parent channel after mate-originated open (no corr= token):
+needs-decision [key=real-money-review]: worker found a real-money risk
+
+Parent captain-facing drain after open:
+OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):
+amplifica [key=real-money-review] needs-decision: worker found a real-money risk
+OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'
+
+$ fm-send.sh wi812 --resolve-key real-money-review "fix it before release"
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the requested message WILL still be sent.
+●  repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Message delivered to the worker endpoint:
+fix it before release
+
+Worker ledger after answer:
+needs-decision [key=real-money-review]: worker found a real-money risk
+resolved [key=real-money-review]: answered: fix it before release
+
+Parent channel after the same answer:
+needs-decision [key=real-money-review]: worker found a real-money risk
+resolved [key=real-money-review]: answered: fix it before release
+
+Authoritative parent open-decision fold after close:
+(empty - real-money-review is closed in the channel where it opened)
+
+Verification assertions:
+PASS: originated escalation reached parent without corr=; worker-targeted answer closed both live copies; parent fold is clean.
