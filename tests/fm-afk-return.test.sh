@@ -285,11 +285,12 @@ test_away_reentry_refuses_pending_return_gate() {
   pass "away-mode re-entry fails closed while the prior return catch-up is pending"
 }
 
-test_check_retries_recorded_terminal_teardown() {
+test_check_retries_terminal_teardown_without_stale_report_cause() {
   local dir gate out rc
   dir="$TMP_ROOT/terminal-teardown"
   install_runner "$dir"
   gate="$dir/home/state/.afk-return-catchup"
+  seed_live_blocker "$dir" tmux teardown-dependency
   date +%s > "$dir/home/state/.afk"
   printf 'herdr\tsynthetic:pane\tsynthetic-workspace\n' > "$dir/home/state/.afk-daemon-terminal"
   touch "$dir/home/state/.fail-terminal-stop-once"
@@ -303,19 +304,34 @@ test_check_retries_recorded_terminal_teardown() {
   [ -e "$dir/home/state/.afk-daemon-terminal" ] || fail "failed terminal teardown discarded its durable record"
   [ ! -e "$dir/home/state/.afk" ] || fail "failed terminal teardown did not preserve stop ordering"
 
-  out=$(run_return "$dir" report-guard) || fail "lifecycle-only report snapshot should proceed: $out"
+  out=$(run_return "$dir" report-guard) || fail "active-lifecycle report snapshot should proceed: $out"
   case "$(printf '%s\n' "$out" | head -1)" in
     pending) : ;;
-    *) fail "lifecycle-only report snapshot did not remain pending: $out" ;;
+    *) fail "active-lifecycle report snapshot did not remain pending: $out" ;;
   esac
-  assert_contains "$out" "lifecycle"$'\t'"away-mode shutdown failed" \
-    "lifecycle-only report snapshot did not surface why catch-up is pending"
+  assert_contains "$out" "lifecycle"$'\t'"away-mode shutdown remains incomplete" \
+    "active-lifecycle report snapshot did not surface why catch-up is pending"
 
-  out=$(run_return "$dir" check) || fail "check did not retry recorded terminal teardown: $out"
+  set +e
+  out=$(run_return "$dir" check)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "live blocker should keep catch-up gated after teardown succeeds (rc=$rc): $out"
   [ ! -e "$dir/home/state/.afk-daemon-terminal" ] || fail "successful check left the terminal teardown record behind"
-  [ ! -e "$gate" ] || fail "successful terminal teardown retry left the return gate behind"
+  [ -e "$gate" ] || fail "live blocker should preserve the return gate"
   [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 2 ] || fail "check did not retry terminal teardown exactly once"
-  pass "check retries recorded terminal teardown and keeps catch-up gated until success"
+
+  out=$(run_return "$dir" report-guard) || fail "post-teardown report snapshot should proceed: $out"
+  assert_contains "$out" "blocker"$'\t'"repair-task"$'\t'"teardown-dependency" \
+    "post-teardown report did not surface the live blocker"
+  assert_not_contains "$out" 'shutdown' \
+    "post-teardown report replayed a resolved shutdown failure"
+
+  printf 'resolved [key=teardown-dependency]: refreshed the synthetic token and resumed the task\n' \
+    >> "$dir/home/state/repair-task.status"
+  out=$(run_return "$dir" check) || fail "resolved blocker did not clear catch-up: $out"
+  [ ! -e "$gate" ] || fail "resolved blocker left the return gate behind"
+  pass "check retries terminal teardown without reporting a resolved failure as current"
 }
 
 test_return_gate_gates_mutation_passes_readonly_report_and_clears
@@ -324,4 +340,4 @@ test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain
 test_away_reentry_refuses_pending_return_gate
-test_check_retries_recorded_terminal_teardown
+test_check_retries_terminal_teardown_without_stale_report_cause

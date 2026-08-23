@@ -1007,8 +1007,9 @@ test_return_catchup_surfaces_prominently_and_report_proceeds() {
       .kind == "lifecycle"
       and .id == ""
       and .key == ""
-      and (.reason | test("shutdown failed"))))
-  ' >/dev/null || fail "the lifecycle-only catch-up cause must be surfaced: $json"
+      and (.reason | test("return catch-up remains pending"))))
+    and (.return_catchup | all(.[]; (.reason | test("shutdown failed") | not)))
+  ' >/dev/null || fail "the lifecycle-only catch-up cause must be current: $json"
 
   help=$(run "$home" "$fakebin" --help) || fail "Bearings help should render"
   assert_contains "$help" 'Default fields: return_catchup_pending, return_catchup{kind,id,key,reason}, schema,' \

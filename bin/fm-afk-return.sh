@@ -39,8 +39,9 @@
 #      command prints a current snapshot so the caller can render them, and hiding
 #      them would make the gate cosmetic. Its stdout contract is `pending` followed
 #      by `blocker<TAB>id<TAB>key<TAB>reason` rows freshly folded from the live
-#      status streams and any `lifecycle<TAB>reason` rows that still explain the
-#      gate. A lifecycle-only gate always gets a non-empty lifecycle reason.
+#      status streams and any `lifecycle<TAB>reason` rows derived from current
+#      lifecycle state. A lifecycle-only gate always gets a non-empty current or
+#      generic pending reason rather than replaying historical evidence.
 #   3. The catch-up requirement itself is untouched: the gate still opens, still
 #      requires begin/check, and still blocks ordinary mutating work as before.
 # report-guard still refuses outright while away mode is ACTIVE (state/.afk), which
@@ -182,21 +183,14 @@ report_guard() {
     # shellcheck disable=SC1091
     . "$SCRIPT_DIR/fm-classify-lib.sh"
     blockers=$(scan_open_blockers)
-    lifecycle=$(awk -F '\t' '
-      $1 == "evidence" && $2 == "lifecycle" && $3 != "" && !seen[$3]++ {
-        print "lifecycle\t" $3
-      }
-    ' "$GATE" 2>/dev/null || true)
-    if [ -z "$blockers" ] && [ -z "$lifecycle" ]; then
-      phase=$(awk -F '\t' '$1 == "phase" { print $2; exit }' "$GATE" 2>/dev/null || true)
-      case "$phase" in
-        stopping-and-draining)
-          lifecycle=$'lifecycle\taway-mode return catch-up has not completed lifecycle reconciliation'
-          ;;
-        *)
-          lifecycle=$'lifecycle\treturn catch-up remains pending until bin/fm-afk-return.sh check completes'
-          ;;
-      esac
+    phase=$(awk -F '\t' '$1 == "phase" { print $2; exit }' "$GATE" 2>/dev/null || true)
+    lifecycle=
+    if [ -e "$STATE/.afk-daemon-terminal" ]; then
+      lifecycle=$'lifecycle\taway-mode shutdown remains incomplete; lifecycle state is preserved for retry'
+    elif [ "$phase" = stopping-and-draining ]; then
+      lifecycle=$'lifecycle\taway-mode return catch-up has not completed lifecycle reconciliation'
+    elif [ -z "$blockers" ]; then
+      lifecycle=$'lifecycle\treturn catch-up remains pending until bin/fm-afk-return.sh check completes'
     fi
     printf 'pending\n'
     [ -z "$blockers" ] || printf '%s\n' "$blockers"

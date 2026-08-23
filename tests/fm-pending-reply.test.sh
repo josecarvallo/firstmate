@@ -849,6 +849,40 @@ test_local_mirror_requires_delivery() {
   pass "local mirror requires established delivery"
 }
 
+test_remote_own_home_report_is_not_locally_mirrored() {
+  local home state sm_home corr rec status before
+  home=$(setup_parent remote-local-mirror-exclusion)
+  state="$home/state"
+  sm_home="$home/remote-sm"
+  mkdir -p "$sm_home/state"
+  export FM_PENDING_REPLY_NOW=8350
+  fm_write_meta "$state/ios.meta" \
+    "window=fm-remote:w1:p1" "harness=claude" "kind=secondmate" "mode=secondmate" \
+    "home=$sm_home" "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
+  corr=$(fm_pending_reply_create "$home" "$state" "ios" "remote build status")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase escalated
+  fm_pending_reply_set "$rec" escalated_epoch 8300
+  status="$state/ios.status"
+  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=ios pending-reply-id=%s request=remote build status\n' \
+    "$corr" "$corr" > "$status"
+  printf 'done [corr=%s]: remote build is green\n' "$corr" > "$sm_home/state/ios.status"
+  before=$(cat "$status")
+
+  fm_pending_reply_tick "$state" || fail "remote exclusion tick should succeed"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "a remote own-home line must not resolve through the local mirror"
+  [ "$(cat "$status")" = "$before" ] \
+    || fail "the local mirror wrote raw remote status bytes into the parent channel"
+  if fm_pending_reply_mirror_local_report "$state" "$corr" "$sm_home"; then
+    fail "the local mirror must reject a record whose task metadata is remote"
+  fi
+  [ -z "$(fm_pending_reply_get "$rec" local_home_scan_signature)" ] \
+    || fail "the rejected remote home must not advance the local scan signature"
+  pass "remote own-home replies remain exclusively owned by the remote adapter"
+}
+
 test_unmarked_captain_input_creates_no_expectation() {
   local dir fb log home rc pending_count
   dir="$TMP_ROOT/unmarked"; mkdir -p "$dir"
@@ -1306,6 +1340,7 @@ test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
 test_local_own_home_report_is_mirrored_and_resolves
 test_local_mirror_requires_delivery
+test_remote_own_home_report_is_not_locally_mirrored
 test_unmarked_captain_input_creates_no_expectation
 test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
 test_document_pointer_resolves

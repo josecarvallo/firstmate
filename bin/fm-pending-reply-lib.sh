@@ -30,8 +30,9 @@
 # nothing could close. An exact 16-hex corr match is proof, not a heuristic: the
 # token is embedded only in the request delivered to that mate, so a mate could
 # already self-resolve by writing it to the parent directly, and mirroring grants
-# no power the parent channel did not already trust. Only a delivered record is
-# mirrored, so the corr line is never evidence a request was actually delivered.
+# no power the parent channel did not already trust. Only a delivered record whose
+# task metadata has no remote_host is mirrored, so the corr line is never evidence
+# a request was actually delivered and remote replies stay owned by their adapter.
 #
 # Record location (parent FM_HOME):
 #   state/pending-replies/<corr_id>
@@ -1167,9 +1168,11 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
 # cost to a changed secondmate status set, exactly like detect_wrong_home.
 fm_pending_reply_mirror_local_report() {  # <state-dir> <corr_id> <secondmate-home>
   local state=$1 corr=$2 sm_home=$3
-  local rec phase delivered parent_status snapshot previous status_file rc=1 line=''
+  local rec task_id phase delivered parent_status snapshot previous status_file rc=1 line=''
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  fm_pending_reply_target_is_remote "$state" "$task_id" && return 1
   [ -n "$sm_home" ] && [ -d "$sm_home" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   [ "$phase" != resolved ] || return 1
@@ -1324,7 +1327,11 @@ fm_pending_reply_tick() {  # <state-dir>
     meta="$state/${task_id}.meta"
     if [ "$phase" = escalated ]; then
       sm_home=
-      [ -f "$meta" ] && sm_home=$(fm_meta_get "$meta" home)
+      remote_host=
+      if [ -f "$meta" ]; then
+        remote_host=$(fm_meta_get "$meta" remote_host)
+        [ -n "$remote_host" ] || sm_home=$(fm_meta_get "$meta" home)
+      fi
       # Mirror a local secondmate's own-home repost into the parent channel first,
       # so an escalation whose only answer landed in the wrong home still resolves.
       if [ -n "$sm_home" ]; then
