@@ -540,15 +540,18 @@ test_hidden_shallow_clone_unshallows_and_reports() {
 }
 
 test_hidden_non_repo_directory_stays_silent() {
-  local home out
-  home=$(new_home)
+  local home before out after
+  home=$(build_enclosing_home hidden-nonrepo)
   mkdir -p "$home/projects/.cache"
+  before=$(head_sha "$home")
 
   out=$(run_sync "$home")
+  after=$(head_sha "$home")
 
   assert_not_contains "$out" ".cache:" \
     "hidden non-repository directory produced a fleet-sync outcome"
   [ -d "$home/projects/.cache" ] || fail "hidden non-repository directory was removed"
+  [ "$before" = "$after" ] || fail "hidden non-repository directory advanced the enclosing home"
   pass "an immediate hidden non-repository directory is ignored silently"
 }
 
@@ -690,6 +693,57 @@ test_transient_packed_refs_lock_self_clears() {
     "transient lock: recovery summary not emitted on stdout"
   assert_absent "$clone/.git/packed-refs.lock" "transient lock: lock should be gone after self-clear"
   pass "a transient packed-refs.lock that self-clears is retried without a force-remove"
+}
+
+test_non_clone_dir_never_syncs_the_enclosing_repo() {
+  local home before out after
+  home=$(build_enclosing_home nonclone)
+  # A worktree container, not a clone: the repo is one level BELOW it.
+  mkdir -p "$home/projects/not-a-clone/wt"
+  before=$(head_sha "$home")
+
+  out=$(run_sync "$home")
+  after=$(head_sha "$home")
+
+  assert_not_contains "$out" "not-a-clone:" \
+    "a whole-fleet refresh reported a visible non-project directory"
+  assert_not_contains "$out" "not-a-clone: synced" \
+    "a non-repo directory must never be reported as a synced project"
+  [ "$before" = "$after" ] || \
+    fail "fleet-sync fast-forwarded the enclosing repo ($before -> $after) under a project's label"
+  pass "a non-repo directory under projects/ never fast-forwards the enclosing repo"
+}
+
+test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo() {
+  local home before out after
+  home=$(build_enclosing_home nonclonedirect)
+  mkdir -p "$home/projects/not-a-clone"
+  before=$(head_sha "$home")
+
+  out=$(run_sync "$home" not-a-clone)
+  after=$(head_sha "$home")
+
+  assert_contains "$out" "not-a-clone: skipped: not a clone root" \
+    "the single-project form must apply the same clone-root guard"
+  [ "$before" = "$after" ] || \
+    fail "the single-project form fast-forwarded the enclosing repo ($before -> $after)"
+  pass "the single-project form also refuses a directory that is not its own clone root"
+}
+
+test_symlinked_clone_still_syncs() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" sigma)
+  advance_origin "$home" sigma C1
+  # A symlinked clone dir is a real clone root; the guard compares resolved paths,
+  # so it must not be mistaken for a directory nested in someone else's repo.
+  mv "$clone" "$home/real-sigma"
+  ln -s "$home/real-sigma" "$clone"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "sigma: synced" "a symlinked clone must still fast-forward"
+  pass "the clone-root guard accepts a symlinked clone directory"
 }
 
 test_non_signature_fetch_failure_is_not_retried() {
