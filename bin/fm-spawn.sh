@@ -134,6 +134,8 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   The ship delivery-contract validation runs before any shallow-history repair,
+#   so an invalid delivery request cannot trigger that network mutation.
 #   Before creating a fresh ship/scout lane, spawn completes a shallow primary
 #   project clone from origin. It reports the before/after history count when it
 #   repairs one and refuses the lane loudly when the repair cannot complete.
