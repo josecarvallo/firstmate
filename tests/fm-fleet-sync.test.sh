@@ -115,6 +115,40 @@ run_sync() {
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
 }
 
+# build_enclosing_home <name>: an FM_HOME that is itself nested inside another git
+# repository - firstmate's own layout, where projects/ sits inside the firstmate
+# checkout. The enclosing repo is a clean clone of a bare origin that is one commit
+# ahead, so a sync that walked git discovery UP out of projects/<dir> would find a
+# fast-forward available and visibly take it. Echoes the enclosing repo, which is
+# also the home. Its work tree is left pristine so the only thing under projects/
+# is what the test puts there.
+build_enclosing_home() {
+  local name=$1 root work remote enclosing remote_abs
+  root="$TMP_ROOT/enclosing-$name"
+  work="$root/work"
+  remote="$root/remote.git"
+  enclosing="$root/enclosing"
+  mkdir -p "$root"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/main
+  printf '/projects/\n' > "$work/.gitignore"
+  git -C "$work" add .gitignore
+  commit_file "$work" AGENTS.md v0 C0
+
+  git clone --quiet --bare "$work" "$remote"
+  remote_abs=$(cd "$remote" && pwd)
+  git -C "$work" remote add origin "file://$remote_abs"
+  git -C "$work" push -q -u origin main
+
+  git clone --quiet "file://$remote_abs" "$enclosing"
+  commit_file "$work" AGENTS.md v1 C1
+  git -C "$work" push -q origin main
+
+  mkdir -p "$enclosing/projects"
+  printf '%s\n' "$enclosing"
+}
+
 # --- packed-refs.lock fixtures ----------------------------------------------
 
 # build_packed_prunable <home> <name>: like build_pair, but the clone has PACKED

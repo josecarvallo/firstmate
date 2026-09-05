@@ -79,7 +79,7 @@ make_shallow_case() {
 
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
-  fm_test_spawn_brief "$home" "$id"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
 
   git init --quiet -b main "$source"
