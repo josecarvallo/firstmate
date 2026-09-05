@@ -1,0 +1,13 @@
+scenario=active remote job under a controlled 6-second worker cycle
+job_state_before_stale=running
+stale_heartbeat_mtime=946695600
+probe_after_40x0.05s=expired_without_readiness
+probe_success_attempt=47 (within 100x0.05s)
+refreshed_heartbeat_mtime=1788643930
+job_state_at_probe_success=running
+worker_pid_before=61036
+worker_pid_after_ensure=61036
+worker_reused=yes
+job_exit_after_release=0
+held_job_side_effect=ran
+result=40-attempt budget expired; 100-attempt budget observed readiness while the same job was still running
