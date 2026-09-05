@@ -1647,18 +1647,6 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
-if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-  if [ "$RELAUNCH" -eq 0 ]; then
-    PROJECT_DEPTH_OUT=
-    if ! PROJECT_DEPTH_OUT=$(fm_project_unshallow_if_needed "$PROJ_ABS"); then
-      echo "error: project $(basename "$PROJ_ABS") depth repair failed: $PROJECT_DEPTH_OUT; refusing to create a worker lane" >&2
-      exit 1
-    fi
-    if [ -n "$PROJECT_DEPTH_OUT" ]; then
-      echo "project $(basename "$PROJ_ABS"): recovered: $PROJECT_DEPTH_OUT"
-    fi
-  fi
-fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
@@ -1691,6 +1679,17 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+if { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } && [ "$RELAUNCH" -eq 0 ]; then
+  PROJECT_DEPTH_OUT=
+  if ! PROJECT_DEPTH_OUT=$(fm_project_unshallow_if_needed "$PROJ_ABS"); then
+    echo "error: project $(basename "$PROJ_ABS") depth repair failed: $PROJECT_DEPTH_OUT; refusing to create a worker lane" >&2
+    exit 1
+  fi
+  if [ -n "$PROJECT_DEPTH_OUT" ]; then
+    echo "project $(basename "$PROJ_ABS"): recovered: $PROJECT_DEPTH_OUT"
   fi
 fi
 
