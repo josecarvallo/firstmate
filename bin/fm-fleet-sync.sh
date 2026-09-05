@@ -305,8 +305,22 @@ sync_project() {
     echo "$label: skipped: not a directory"
     return 0
   fi
-  if ! git -C "$PROJ" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    echo "$label: skipped: not a git repo"
+  # Git repository discovery walks UP from $PROJ, so a plain directory merely
+  # nested inside a repository - a worktree container left under projects/, say -
+  # resolves to the ENCLOSING repository, which in a firstmate home is the
+  # firstmate checkout itself. Every later `git -C "$PROJ"` would then read, prune
+  # and fast-forward that repository under this project's label, turning a routine
+  # refresh into an unrequested self-update reported as a project sync. Require
+  # $PROJ to be the root of its own work tree before any other git command runs.
+  proj_top=$(git -C "$PROJ" rev-parse --show-toplevel 2>/dev/null) || proj_top=""
+  if [ -z "$proj_top" ]; then
+    return 0
+  fi
+  # Both sides are physical paths (git resolves --show-toplevel through symlinks),
+  # so a symlinked clone dir still compares equal to its own root.
+  proj_abs=$(cd "$PROJ" && pwd -P) || proj_abs=""
+  if [ "$proj_top" != "$proj_abs" ]; then
+    echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0
   fi
   if ! depth_out=$(fm_project_unshallow_if_needed "$PROJ"); then
@@ -438,7 +452,7 @@ if [ $# -eq 1 ]; then
 fi
 
 [ -d "$PROJECTS" ] || exit 0
-for proj in "$PROJECTS"/*; do
+for proj in "$PROJECTS"/* "$PROJECTS"/.[!.]* "$PROJECTS"/..?*; do
   [ -e "$proj" ] || continue
   [ -d "$proj" ] || continue
   # Per-clone elapsed, so a fleet refresh that runs long names WHICH clone cost
