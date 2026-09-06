@@ -1537,7 +1537,7 @@ EOF
 # explicit home and repo exclusions remain necessary because git registers the
 # main checkout as a worktree too.
 teardown_task_docker_stack() {  # <worktree-dir> <project>
-  local dir=$1 project=$2 abs_dir abs_home abs_root ids id count failed_ids=
+  local dir=$1 project=$2 abs_dir abs_home abs_root project_root abs_project ids id count failed_ids=
   [ -n "$dir" ] || return 0
   command -v docker >/dev/null 2>&1 || return 0
   fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker info >/dev/null 2>&1 || return 0
@@ -1550,6 +1550,12 @@ teardown_task_docker_stack() {  # <worktree-dir> <project>
   abs_root=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || abs_root=
   if [ -n "$abs_root" ] && { [ "$abs_root" = "$abs_dir" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; }; then
     echo "warning: task $ID's recorded worktree $abs_dir is the firstmate repo itself; refusing to touch any docker stack there" >&2
+    return 0
+  fi
+  project_root=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null || true)
+  abs_project=$(canonical_existing_dir "$project_root" 2>/dev/null || true)
+  if [ -n "$abs_project" ] && [ "$abs_project" = "$abs_dir" ]; then
+    echo "warning: task $ID's recorded worktree $abs_dir is the recorded project's primary checkout; refusing to touch any docker stack there" >&2
     return 0
   fi
   if ! worktree_registered_for_project "$project" "$dir"; then

@@ -153,6 +153,7 @@ run_teardown() {
   FM_TEARDOWN_GUARD_DONE=1 \
   FM_DOCKER_TREEHOUSE_LOG="$case_dir/treehouse.log" \
   FM_FAKE_DOCKER_STATE="$case_dir/docker.state" \
+  FM_FAKE_DOCKER_LOG="$case_dir/docker.log" \
   FM_FAKE_DOCKER_STOP_FAIL_ID="${FM_FAKE_DOCKER_STOP_FAIL_ID:-}" \
   FM_FAKE_DOCKER_RM_FAIL_ID="${FM_FAKE_DOCKER_RM_FAIL_ID:-}" \
   FM_FAKE_DOCKER_HANG_COMMAND="${FM_FAKE_DOCKER_HANG_COMMAND:-}" \
@@ -171,6 +172,7 @@ install_stateful_docker() {
 set -u
 state=${FM_FAKE_DOCKER_STATE:?}
 command=${1:-}
+[ -z "${FM_FAKE_DOCKER_LOG:-}" ] || printf '%s\n' "$command" >> "$FM_FAKE_DOCKER_LOG"
 if [ "${FM_FAKE_DOCKER_HANG_COMMAND:-}" = "$command" ]; then
   sleep "${FM_FAKE_DOCKER_HANG_SECS:-3}"
   : > "${state}.${command}.completed"
@@ -644,6 +646,29 @@ test_docker_stack_never_touches_unregistered_directory() {
   pass "a worktree field pointing at a real but unregistered directory never reaches its docker containers"
 }
 
+test_docker_stack_never_touches_project_primary_checkout() {
+  local id=docker-guard-primary case_dir primary rc state
+  case_dir=$(make_case "$id")
+  primary=$(canon "$case_dir/project")
+  corrupt_meta_worktree "$case_dir" "$id" "$primary"
+  install_stateful_docker "$case_dir"
+  seed_fake_docker_container "$case_dir" primary-container "$primary"
+
+  set +e
+  run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-guard-primary: teardown should still succeed"
+
+  state=$(fake_docker_container_running "$case_dir" primary-container)
+  [ "$state" = true ] || fail "docker-guard-primary: the project primary checkout's container was removed"
+  assert_grep "recorded project's primary checkout" "$case_dir/stderr" \
+    "docker-guard-primary: teardown should visibly reject the project primary checkout"
+  assert_no_grep '^ps$' "$case_dir/docker.log" \
+    "docker-guard-primary: teardown enumerated containers before rejecting the project primary checkout"
+  pass "the recorded project primary checkout is rejected before docker enumeration"
+}
+
 test_portable_docker_stack_is_stopped_on_teardown
 test_portable_docker_stack_isolation
 test_docker_removal_failure_is_reported_and_non_blocking
@@ -652,6 +677,7 @@ test_docker_absent_does_not_break_teardown
 test_docker_daemon_unreachable_does_not_break_teardown
 test_no_docker_stack_present_completes_silently
 test_docker_enumeration_failure_is_reported_and_non_blocking
+test_docker_stack_never_touches_project_primary_checkout
 
 if [ "$REAL_DOCKER_AVAILABLE" = 1 ]; then
   test_docker_stack_is_stopped_on_teardown

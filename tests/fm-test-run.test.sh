@@ -55,6 +55,9 @@ test_family_selection() {
   fam_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
   [ "$fam_count" -lt "$all_count" ] \
     || fail "pure-contract-unit must be a proper subset of --all"
+  listed=$("$RUNNER" --list --family session-bootstrap)
+  assert_contains "$listed" "tests/fm-fork-sync.test.sh" \
+    "session-bootstrap must classify fork-sync coverage"
   pass "family selection returns a proper subset of the suite"
 }
 
@@ -101,9 +104,12 @@ init_changed_fixture_repo() {
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
+    fm-update.test.sh \
+    fm-fork-sync.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
+    fm-review-diff.test.sh \
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
@@ -116,6 +122,7 @@ init_changed_fixture_repo() {
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-ff-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -136,6 +143,15 @@ test_changed_dependency_selection_and_unmapped_failure() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/bin/fm-ff-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-brief.test.sh" "ff helper selects pure contract coverage"
+  assert_contains "$listed" "tests/fm-update.test.sh" "ff helper selects update coverage"
+  assert_contains "$listed" "tests/fm-fork-sync.test.sh" "ff helper selects fork-sync coverage"
+  assert_contains "$listed" "tests/fm-review-diff.test.sh" "ff helper selects review-diff coverage"
+  git -C "$repo" add bin/fm-ff-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm ff-helper-change
 
   printf '\n' >>"$repo/tests/lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
