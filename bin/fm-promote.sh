@@ -139,9 +139,14 @@ if fm_delivery_opens_pull_request "$MODE"; then
   if [ -n "$BASE_UNVERIFIED" ]; then
     echo "note: $BASE_UNVERIFIED, and mode=$MODE opens a pull request against origin; promoting anyway, but confirm by hand that this task's base carries nothing origin has not seen" >&2
   else
-    BASE_UNPUSHED=$(git -C "$WT" rev-list --count "$BASE_ORIGIN_REV..$BASE_REV" 2>/dev/null || true)
-    case "$BASE_UNPUSHED" in ''|*[!0-9]*) BASE_UNPUSHED=0 ;; esac
-    if [ "$BASE_UNPUSHED" -gt 0 ]; then
+    if ! BASE_UNPUSHED=$(git -C "$WT" rev-list --count "$BASE_ORIGIN_REV..$BASE_REV" 2>/dev/null); then
+      BASE_UNVERIFIED="could not verify whether the spawn base recorded for task $ID carries commits origin/$BASE_DEFAULT has not seen"
+    elif [ -z "$BASE_UNPUSHED" ] || [ -n "${BASE_UNPUSHED//[0-9]/}" ]; then
+      BASE_UNVERIFIED="the spawn base recorded for task $ID produced an invalid reachability count '$BASE_UNPUSHED'"
+    fi
+    if [ -n "$BASE_UNVERIFIED" ]; then
+      echo "note: $BASE_UNVERIFIED, and mode=$MODE opens a pull request against origin; promoting anyway, but confirm by hand that this task's base carries nothing origin has not seen" >&2
+    elif [ "$BASE_UNPUSHED" -gt 0 ]; then
       if [ "$BASE_UNPUSHED" -eq 1 ]; then BASE_UNIT=commit; else BASE_UNIT=commits; fi
       echo "error: the base task $ID was spawned from carries $BASE_UNPUSHED $BASE_UNIT origin/$BASE_DEFAULT does not, and mode=$MODE opens a pull request against origin; refusing to promote rather than publish that unpushed local history inside the PR" >&2
       exit 1

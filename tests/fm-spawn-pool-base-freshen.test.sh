@@ -90,6 +90,7 @@ make_shallow_case() {
   done
   git clone --quiet --bare "$source" "$origin"
   remote_abs=$(cd "$origin" && pwd)
+  # This private, disposable fixture may use --depth; it never touches a shared project or lane repository.
   git clone --quiet --depth 2 "file://$remote_abs" "$project"
   git -C "$project" worktree add --quiet --detach "$pool" HEAD
 
@@ -111,6 +112,30 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
+}
+
+install_rev_list_failure_git() {
+  local fakebin=$1
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+real=${REAL_GIT_FOR_TEST:?}
+dir=
+prev=
+is_rev_list=0
+range=
+for arg in "$@"; do
+  [ "$prev" = -C ] && dir=$arg
+  [ "$arg" = rev-list ] && is_rev_list=1
+  case "$arg" in HEAD..*|*..HEAD) range=$arg ;; esac
+  prev=$arg
+done
+if [ "$is_rev_list" -eq 1 ] && [ "$dir" = "${FAIL_REV_LIST_DIR:-}" ] && [ -n "$range" ]; then
+  exit 70
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$fakebin/git"
 }
 
 test_stale_pool_base_refreshes_before_branching() {
@@ -401,6 +426,28 @@ test_pr_delivery_refuses_to_reset_a_slot_backwards() {
   pass "a PR delivery refuses rather than silently discard clean commits from the pooled slot"
 }
 
+test_unreadable_reachability_refuses_without_resetting_the_slot() {
+  local rec id out status before
+  id='pool-unreadable-reachability-r19'
+  rec=$(make_case unreadable-reachability "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  install_rev_list_failure_git "$FAKEBIN_DIR"
+
+  out=$(REAL_GIT_FOR_TEST="$(command -v git)" FAIL_REV_LIST_DIR="$POOL_DIR" \
+    run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "spawn reset a slot whose commit reachability could not be counted"
+  assert_contains "$out" "refusing to reset when commit reachability is unknown" \
+    "spawn did not explain the failed reachability count"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the pooled slot after its reachability count failed"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "spawn published task metadata after its reachability count failed"
+  pass "an unreadable reachability count refuses without resetting the pooled slot"
+}
+
 test_diverged_local_candidates_refuse_without_moving_the_slot() {
   local rec id out status before publisher
   id='pool-diverged-r17'
@@ -435,6 +482,7 @@ test_unreachable_origin_refuses_stale_pool_base
 test_local_only_uses_and_reports_the_primary_tip
 test_pr_delivery_keeps_origin_and_reports_withheld_history
 test_pr_delivery_refuses_to_reset_a_slot_backwards
+test_unreadable_reachability_refuses_without_resetting_the_slot
 test_diverged_local_candidates_refuse_without_moving_the_slot
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

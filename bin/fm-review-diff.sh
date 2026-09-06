@@ -3,8 +3,9 @@
 #
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares pull-request deliveries against origin/<default> after fetching
-# it. Other tasks use whichever of that tip and the local default branch contains
-# the other, matching the base selected by fm-spawn.sh.
+# it. Other tasks use the exact spawn base recorded in task metadata. Legacy
+# records without base= use an ordered current candidate only when one contains
+# the other, matching the base selection used by fm-spawn.sh.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -128,6 +129,7 @@ resolve_pr_head() {
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+SPAWN_BASE=$(grep '^base=' "$META" | tail -1 | cut -d= -f2- || true)
 COMPARE_REF=$BRANCH
 if [ -n "$PR_URL" ]; then
   if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
@@ -138,7 +140,16 @@ if [ -n "$PR_URL" ]; then
 fi
 
 resolve_review_base() {
-  local origin_rev local_rev
+  local origin_rev local_rev recorded_rev
+  if ! fm_delivery_opens_pull_request "$MODE" && [ -n "$SPAWN_BASE" ]; then
+    recorded_rev=$(git -C "$WT" rev-parse --verify --quiet "$SPAWN_BASE^{commit}" 2>/dev/null || true)
+    [ -n "$recorded_rev" ] || {
+      echo "error: recorded spawn base $SPAWN_BASE does not resolve in $WT" >&2
+      return 1
+    }
+    printf '%s' "$recorded_rev"
+    return 0
+  fi
   origin_rev=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT^{commit}" 2>/dev/null || true)
   [ -n "$origin_rev" ] || { printf '%s' "$DEFAULT"; return 0; }
   if fm_delivery_opens_pull_request "$MODE"; then
@@ -149,8 +160,11 @@ resolve_review_base() {
   [ -n "$local_rev" ] || { printf '%s' "origin/$DEFAULT"; return 0; }
   if git -C "$WT" merge-base --is-ancestor "$local_rev" "$origin_rev" 2>/dev/null; then
     printf '%s' "origin/$DEFAULT"
-  else
+  elif git -C "$WT" merge-base --is-ancestor "$origin_rev" "$local_rev" 2>/dev/null; then
     printf '%s' "$DEFAULT"
+  else
+    echo "error: cannot infer a review base because $DEFAULT and origin/$DEFAULT have diverged and task $ID records no base=" >&2
+    return 1
   fi
 }
 
@@ -158,10 +172,8 @@ if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE=$(resolve_review_base)
-else
-  BASE="$DEFAULT"
 fi
+BASE=$(resolve_review_base)
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }

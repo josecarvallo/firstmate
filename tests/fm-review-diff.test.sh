@@ -191,9 +191,43 @@ test_delivery_mode_selects_the_same_base_as_spawn() {
   pass "fm-review-diff reads the shared delivery rule used by spawn and promotion"
 }
 
+test_non_pr_review_uses_the_recorded_spawn_base_after_candidate_divergence() {
+  local case_dir publisher base out
+  case_dir=$(make_case recorded-base)
+  publisher="$case_dir/publisher"
+  git clone -q "$case_dir/origin.git" "$publisher"
+  printf 'origin-only\n' > "$publisher/origin-only.txt"
+  git -C "$publisher" add origin-only.txt
+  git -C "$publisher" commit -qm "origin advances"
+  git -C "$publisher" push -q origin main
+
+  git -C "$case_dir/wt" fetch -q origin
+  base=$(git -C "$case_dir/wt" rev-parse origin/main)
+  git -C "$case_dir/wt" reset -q --hard "$base"
+  printf 'task-only\n' > "$case_dir/wt/task-only.txt"
+  git -C "$case_dir/wt" add task-only.txt
+  git -C "$case_dir/wt" commit -qm "task change"
+
+  printf 'local-only\n' > "$case_dir/project/local-only.txt"
+  git -C "$case_dir/project" add local-only.txt
+  git -C "$case_dir/project" commit -qm "local main diverges"
+  write_task_meta "$case_dir" "mode=local-only" "base=$base"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" "diff base: $base" \
+    "non-PR review did not stay anchored to its recorded spawn base"
+  assert_contains "$out" "task-only.txt" \
+    "non-PR review omitted the task change above its recorded base"
+  assert_not_contains "$out" "origin-only.txt" \
+    "non-PR review included an unrelated change already present at its recorded base"
+  pass "fm-review-diff anchors non-PR work to the recorded spawn base"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_delivery_mode_selects_the_same_base_as_spawn
+test_non_pr_review_uses_the_recorded_spawn_base_after_candidate_divergence

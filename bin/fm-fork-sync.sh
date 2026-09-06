@@ -50,7 +50,7 @@ EOF
 config_first_line() {
   local name=$1 val=''
   if [ -f "$CONFIG_DIR/$name" ]; then
-    val=$(sed -n '1p' "$CONFIG_DIR/$name" 2>/dev/null | tr -d '[:space:]')
+    val=$(sed -n '1p' "$CONFIG_DIR/$name" 2>/dev/null)
   fi
   printf '%s' "$val"
 }

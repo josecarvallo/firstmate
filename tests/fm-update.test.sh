@@ -391,10 +391,32 @@ test_config_remote_preserves_guards() {
   pass "T14 fast-forward guards are preserved when the source is the fork"
 }
 
+test_config_remote_with_internal_whitespace_falls_back_to_origin() {
+  local w out before fork_tip
+  w=$(new_world t15)
+  add_fork "$w"
+  bump_fork "$w"
+  fork_tip=$(git --git-dir="$w/fork.git" rev-parse main)
+  mkdir -p "$w/main/config"
+  printf 'fo rk\n' > "$w/main/config/update-remote"
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: already current" \
+    "an unsafe configured remote did not fall back to origin"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "whitespace normalization redirected the update to a different remote"
+  [ "$(git -C "$w/main" rev-parse HEAD)" != "$fork_tip" ] \
+    || fail "an unsafe remote name was collapsed into the valid fork remote"
+  pass "T15 internal whitespace cannot redirect an update remote"
+}
+
 test_updates_main_and_secondmate
 test_config_remote_redirects_to_fork
 test_config_remote_missing_skipped
 test_config_remote_preserves_guards
+test_config_remote_with_internal_whitespace_falls_back_to_origin
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped

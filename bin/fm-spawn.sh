@@ -1828,9 +1828,23 @@ freshen_spawn_worktree_base() {  # <worktree> <primary-checkout> <mode>
   if [ -n "$SPAWN_BASE_WITHHELD" ]; then
     echo "note: pooled worktree '$worktree': $SPAWN_BASE_WITHHELD" >&2
   fi
-  behind=$(git -C "$worktree" rev-list --count "HEAD..$expected" 2>/dev/null || true)
-  ahead=$(git -C "$worktree" rev-list --count "$expected..HEAD" 2>/dev/null || true)
-  if [ -n "$ahead" ] && [ "$ahead" -gt 0 ] 2>/dev/null; then
+  if ! behind=$(git -C "$worktree" rev-list --count "HEAD..$expected" 2>/dev/null); then
+    echo "error: could not count pooled worktree '$worktree' history behind $target; refusing to reset when commit reachability is unknown" >&2
+    return 1
+  fi
+  if ! ahead=$(git -C "$worktree" rev-list --count "$expected..HEAD" 2>/dev/null); then
+    echo "error: could not count pooled worktree '$worktree' history ahead of $target; refusing to reset when commit reachability is unknown" >&2
+    return 1
+  fi
+  case "$behind" in ''|*[!0-9]*)
+    echo "error: pooled worktree '$worktree' returned an invalid behind count '$behind'; refusing to reset when commit reachability is unknown" >&2
+    return 1
+  esac
+  case "$ahead" in ''|*[!0-9]*)
+    echo "error: pooled worktree '$worktree' returned an invalid ahead count '$ahead'; refusing to reset when commit reachability is unknown" >&2
+    return 1
+  esac
+  if [ "$ahead" -gt 0 ]; then
     if [ "$ahead" -eq 1 ]; then unit=commit; else unit=commits; fi
     echo "error: pooled worktree '$worktree' carries $ahead $unit that $target does not; refusing to reset backwards and discard clean commit history" >&2
     return 1
@@ -1844,7 +1858,7 @@ freshen_spawn_worktree_base() {  # <worktree> <primary-checkout> <mode>
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current $target ('$expected'); refusing to launch" >&2
     return 1
   fi
-  if [ -n "$behind" ] && [ "$behind" -gt 0 ] 2>/dev/null; then
+  if [ "$behind" -gt 0 ]; then
     if [ "$behind" -eq 1 ]; then unit=commit; else unit=commits; fi
     echo "note: pooled worktree '$worktree' was $behind $unit behind $target; refreshed to $(git -C "$worktree" rev-parse --short HEAD)" >&2
   fi

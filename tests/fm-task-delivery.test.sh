@@ -139,6 +139,7 @@ EOF
   git clone --quiet --bare "$source" "$origin"
   remote_abs=$(cd "$origin" && pwd -P)
   rmdir "$proj"
+  # This private, disposable fixture may use --depth; it never touches a shared project or lane repository.
   git clone --quiet --depth 1 "file://$remote_abs" "$proj"
   [ "$(git -C "$proj" rev-parse --is-shallow-repository)" = true ] \
     || fail "delivery mismatch fixture is not shallow"
@@ -316,6 +317,64 @@ test_promote_refuses_a_pr_contract_on_an_unpublished_base() {
   pass "fm-promote: a PR contract cannot silently inherit a locally landed base"
 }
 
+test_promote_reports_an_unreadable_base_reachability_check() {
+  local root home project origin wt base out status fakebin real_git
+  root="$TMP_ROOT/promote-unreadable"
+  home="$root/home"
+  project="$root/project"
+  origin="$root/origin.git"
+  wt="$root/wt"
+  fakebin=$(fm_fakebin "$root/fake")
+  mkdir -p "$home/state"
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  git -C "$project" fetch --quiet origin
+  base=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$wt" "$base"
+  printf 'window=fm-promote-u2\nkind=scout\nworktree=%s\nbase=%s\n' "$wt" "$base" \
+    > "$home/state/promote-u2.meta"
+
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+real=${REAL_GIT_FOR_TEST:?}
+dir=
+prev=
+is_rev_list=0
+range=
+for arg in "$@"; do
+  [ "$prev" = -C ] && dir=$arg
+  [ "$arg" = rev-list ] && is_rev_list=1
+  case "$arg" in *..*) range=$arg ;; esac
+  prev=$arg
+done
+if [ "$is_rev_list" -eq 1 ] && [ "$dir" = "${FAIL_REV_LIST_DIR:-}" ] && [ -n "$range" ]; then
+  exit 70
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  out=$(REAL_GIT_FOR_TEST="$real_git" FAIL_REV_LIST_DIR="$wt" PATH="$fakebin:$PATH" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-u2 --mode direct-PR --yolo off 2>&1)
+  status=$?
+
+  expect_code 0 "$status" "an unverified promotion should follow the existing loud manual-confirmation path"
+  assert_contains "$out" "could not verify whether the spawn base recorded for task promote-u2" \
+    "promotion silently treated a failed reachability traversal as zero commits"
+  assert_contains "$out" "confirm by hand" \
+    "promotion did not route traversal failure through manual confirmation"
+  assert_grep 'kind=ship' "$home/state/promote-u2.meta" \
+    "the existing unverified promotion path did not complete"
+  pass "fm-promote reports failed base reachability traversal before promotion"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -357,5 +416,6 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_pr_contract_on_an_unpublished_base
+test_promote_reports_an_unreadable_base_reachability_check
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"
