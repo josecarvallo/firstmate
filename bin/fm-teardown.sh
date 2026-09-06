@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# worktree, or retire a secondmate home; remove Docker Compose projects whose
+# containers' working-directory labels exactly match the validated recorded
+# worktree, including their labeled networks; kill the recorded runtime endpoint,
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -182,7 +184,7 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
-#   Fix 4 - remove Docker Compose containers labeled with this task's recorded
+#   Fix 4 - remove Docker Compose projects labeled with this task's recorded
 #     worktree before returning it. After a bounded Docker availability probe,
 #     teardown canonicalizes the path, rejects the active firstmate home and
 #     repo, and requires a git worktree registered for the recorded project.
