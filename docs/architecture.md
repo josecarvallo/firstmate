@@ -181,8 +181,10 @@ Crewmates never intentionally touch your project clone; [treehouse](https://gith
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 Before allocating a fresh ship or scout lane, it also requires the primary clone to be its own Git worktree root and completes shallow history from origin.
 That repair adds missing history objects without moving branches or touching the worktree, reports measured before/after commit counts, and refuses the spawn before lane creation or metadata publication when it cannot finish.
-`fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
-Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage for isolation, shallow repair, and base freshness.
+`fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: PR deliveries start from the fetched origin tip, while local-only deliveries and scouts can advance to a containing primary-checkout tip that holds locally landed work.
+It reports every measured automatic refresh, refuses diverged candidates instead of guessing, refuses a reset that would discard clean commit history, and records the chosen base so promotion can prevent a later PR contract from publishing history origin has not seen.
+`bin/fm-delivery-lib.sh` is the single owner of which delivery modes open a PR; spawn, promotion, and review-diff all read it so their base decisions cannot drift.
+The spawn header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage for isolation, shallow repair, and base freshness.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.

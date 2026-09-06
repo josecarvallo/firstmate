@@ -326,6 +326,103 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+make_local_only_case() {
+  local name=$1 id=$2 landings=${3:-3} rec n
+  rec=$(make_case "$name" "$id")
+  read_case_record "$rec"
+  # make_case advances origin once. Bring the primary to that tip, then land
+  # commits only on its local default branch, exactly as fm-merge-local.sh does.
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$PROJECT_DIR" reset --quiet --hard origin/main
+  n=0
+  while [ "$n" -lt "$landings" ]; do
+    n=$((n + 1))
+    printf 'local landing %s\n' "$n" > "$PROJECT_DIR/local-$n.txt"
+    git -C "$PROJECT_DIR" add "local-$n.txt"
+    git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "local landing $n"
+  done
+  printf '%s\n' "$rec"
+}
+
+test_local_only_uses_and_reports_the_primary_tip() {
+  local rec id out status primary
+  id='pool-local-only-r15'
+  rec=$(make_local_only_case local-only "$id" 3)
+  read_case_record "$rec"
+  primary=$(git -C "$PROJECT_DIR" rev-parse main)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "a local-only lane should start from locally landed work"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$primary" ] \
+    || fail "local-only spawn ignored the primary checkout's newer tip"
+  assert_contains "$out" "was 4 commits behind main in the primary checkout; refreshed to" \
+    "the automatic base repair did not report its measured size"
+  assert_grep "base=$primary" "$HOME_DIR/state/$id.meta" \
+    "spawn did not record the base promotion must later check"
+  pass "a local-only lane advances to the primary tip and reports the repaired commit count"
+}
+
+test_pr_delivery_keeps_origin_and_reports_withheld_history() {
+  local rec id out status origin_tip
+  id='pool-pr-origin-r16'
+  rec=$(make_local_only_case pr-origin "$id" 2)
+  read_case_record "$rec"
+  origin_tip=$(git -C "$PROJECT_DIR" rev-parse origin/main)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a PR delivery should start from origin"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$origin_tip" ] \
+    || fail "PR delivery inherited local-only history origin has not seen"
+  assert_contains "$out" "carries 2 commits origin/main does not" \
+    "spawn silently withheld the primary-only candidate"
+  assert_grep "base=$origin_tip" "$HOME_DIR/state/$id.meta" \
+    "spawn recorded a base different from the forge tip"
+  pass "a PR delivery keeps origin's tip and reports the excluded local history"
+}
+
+test_pr_delivery_refuses_to_reset_a_slot_backwards() {
+  local rec id out status primary before
+  id='pool-pr-backwards-r18'
+  rec=$(make_local_only_case pr-backwards "$id" 2)
+  read_case_record "$rec"
+  primary=$(git -C "$PROJECT_DIR" rev-parse main)
+  git -C "$POOL_DIR" reset --quiet --hard "$primary"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "PR delivery reset a clean slot backwards"
+  assert_contains "$out" "carries 2 commits that origin/main does not" \
+    "backwards reset refusal did not report the exact discarded history"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "refused backwards reset still moved the pooled slot"
+  pass "a PR delivery refuses rather than silently discard clean commits from the pooled slot"
+}
+
+test_diverged_local_candidates_refuse_without_moving_the_slot() {
+  local rec id out status before publisher
+  id='pool-diverged-r17'
+  rec=$(make_local_only_case diverged "$id" 2)
+  read_case_record "$rec"
+  publisher="$CASE_DIR/diverge-publisher"
+  git clone --quiet "file://$CASE_DIR/origin.git" "$publisher"
+  printf 'forge-only\n' > "$publisher/forge-only.txt"
+  git -C "$publisher" add forge-only.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm forge-only
+  git -C "$publisher" push --quiet origin main
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn guessed between diverged base candidates"
+  assert_contains "$out" "have diverged" "diverged base refusal did not explain the conflict"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "a refused base resolution moved the pooled slot"
+  pass "diverged local and forge bases refuse instead of silently discarding either history"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_shallow_project_repairs_before_lane_creation
 test_shallow_project_without_network_refuses_lane_loudly
@@ -335,5 +432,9 @@ test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_local_only_uses_and_reports_the_primary_tip
+test_pr_delivery_keeps_origin_and_reports_withheld_history
+test_pr_delivery_refuses_to_reset_a_slot_backwards
+test_diverged_local_candidates_refuse_without_moving_the_slot
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

@@ -955,6 +955,12 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
       ;;
+    bin/fm-delivery-lib.sh)
+      # One delivery-mode owner drives spawn, promotion, and review base choice.
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' pr-forge
+      ;;
     bin/fm-composer-lib.sh)
       # The shared shape catalogue is vendor-rendered signal; a change to it
       # re-selects the live guard (fm-composer-matrix-live-e2e) alongside the

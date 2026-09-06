@@ -140,7 +140,12 @@
 #   project clone from origin. It reports the before/after history count when it
 #   repairs one and refuses the lane loudly when the repair cannot complete.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
-#   origin, resolves the current remote default branch, and resets to its tip.
+#   origin and resolves the current remote default branch. PR deliveries reset to
+#   that forge tip. Local-only deliveries and scouts instead use whichever of the
+#   forge tip and the primary checkout's default branch contains the other, so
+#   locally landed work cannot leave every later lane on a stale base. Diverged
+#   candidates and any reset that would move the slot backwards are refused, and
+#   every automatic refresh reports its commit count.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
@@ -261,6 +266,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-delivery-lib.sh
+. "$SCRIPT_DIR/fm-delivery-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
@@ -1745,8 +1752,44 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+SPAWN_BASE_REV=""
+SPAWN_BASE_LABEL=""
+SPAWN_BASE_ERROR=""
+SPAWN_BASE_WITHHELD=""
+
+resolve_spawn_worktree_base() {  # <worktree> <primary-checkout> <default> <origin-rev> <mode>
+  local worktree=$1 primary=$2 default=$3 origin_rev=$4 mode=${5:-}
+  local primary_rev primary_default ahead unit
+  SPAWN_BASE_REV=$origin_rev
+  SPAWN_BASE_LABEL="origin/$default"
+  SPAWN_BASE_ERROR=""
+  SPAWN_BASE_WITHHELD=""
+  primary_rev=$(primary_head_commit "$primary" 2>/dev/null || true)
+  [ -n "$primary_rev" ] || return 0
+  [ "$primary_rev" != "$origin_rev" ] || return 0
+  git -C "$worktree" rev-parse --verify --quiet "$primary_rev^{commit}" >/dev/null 2>&1 || return 0
+  if git -C "$worktree" merge-base --is-ancestor "$primary_rev" "$origin_rev" 2>/dev/null; then
+    return 0
+  fi
+  primary_default=$(default_branch "$primary" 2>/dev/null || printf '%s' "$default")
+  if fm_delivery_opens_pull_request "$mode"; then
+    ahead=$(git -C "$worktree" rev-list --count "$origin_rev..$primary_rev" 2>/dev/null || true)
+    case "$ahead" in ''|*[!0-9]*) ahead=0 ;; esac
+    if [ "$ahead" -eq 1 ]; then unit=commit; else unit=commits; fi
+    SPAWN_BASE_WITHHELD="$primary_default in the primary checkout carries $ahead $unit origin/$default does not, but mode=$mode opens a pull request against origin; starting from origin's tip so those unpushed commits cannot ride along inside it"
+    return 0
+  fi
+  if git -C "$worktree" merge-base --is-ancestor "$origin_rev" "$primary_rev" 2>/dev/null; then
+    SPAWN_BASE_REV=$primary_rev
+    SPAWN_BASE_LABEL="$primary_default in the primary checkout"
+    return 0
+  fi
+  SPAWN_BASE_ERROR="$primary_default in the primary checkout and origin/$default have diverged"
+  return 1
+}
+
+freshen_spawn_worktree_base() {  # <worktree> <primary-checkout> <mode>
+  local worktree=$1 primary=$2 mode=${3:-} default target expected actual status behind ahead unit
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -1776,14 +1819,34 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
     return 1
   fi
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
-    echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
+  if ! resolve_spawn_worktree_base "$worktree" "$primary" "$default" "$expected" "$mode"; then
+    echo "error: cannot resolve a base for pooled worktree '$worktree': $SPAWN_BASE_ERROR; refusing to launch rather than guess which history to build on" >&2
+    return 1
+  fi
+  expected=$SPAWN_BASE_REV
+  target=$SPAWN_BASE_LABEL
+  if [ -n "$SPAWN_BASE_WITHHELD" ]; then
+    echo "note: pooled worktree '$worktree': $SPAWN_BASE_WITHHELD" >&2
+  fi
+  behind=$(git -C "$worktree" rev-list --count "HEAD..$expected" 2>/dev/null || true)
+  ahead=$(git -C "$worktree" rev-list --count "$expected..HEAD" 2>/dev/null || true)
+  if [ -n "$ahead" ] && [ "$ahead" -gt 0 ] 2>/dev/null; then
+    if [ "$ahead" -eq 1 ]; then unit=commit; else unit=commits; fi
+    echo "error: pooled worktree '$worktree' carries $ahead $unit that $target does not; refusing to reset backwards and discard clean commit history" >&2
+    return 1
+  fi
+  if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
+    echo "error: could not reset pooled worktree '$worktree' to $target ('$expected'); refusing to launch from a potentially stale base" >&2
     return 1
   fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
-    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current $target ('$expected'); refusing to launch" >&2
     return 1
+  fi
+  if [ -n "$behind" ] && [ "$behind" -gt 0 ] 2>/dev/null; then
+    if [ "$behind" -eq 1 ]; then unit=commit; else unit=commits; fi
+    echo "note: pooled worktree '$worktree' was $behind $unit behind $target; refreshed to $(git -C "$worktree" rev-parse --short HEAD)" >&2
   fi
 }
 
@@ -2279,7 +2342,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "$PROJ_ABS" "$MODE" || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -2660,6 +2723,7 @@ preserve_relaunch_meta() {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
+  [ -z "${SPAWN_BASE_REV:-}" ] || echo "base=$SPAWN_BASE_REV"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"

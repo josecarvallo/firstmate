@@ -12,6 +12,9 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
+# A scout records the base it was created from. Promotion to a PR-opening mode
+# refuses that base when origin cannot reach it, preventing local-only history
+# from riding into the pull request. Missing evidence is reported, not hidden.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 
@@ -19,6 +22,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+# shellcheck source=bin/fm-delivery-lib.sh
+. "$SCRIPT_DIR/fm-delivery-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -107,6 +115,39 @@ fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+
+WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+SPAWN_BASE=$(grep '^base=' "$META" | tail -1 | cut -d= -f2- || true)
+if fm_delivery_opens_pull_request "$MODE"; then
+  BASE_UNVERIFIED=""
+  if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+    BASE_UNVERIFIED="task $ID has no available recorded worktree"
+  else
+    BASE_DEFAULT=$(default_branch "$WT" 2>/dev/null || true)
+    BASE_ORIGIN_REV=""
+    [ -z "$BASE_DEFAULT" ] || BASE_ORIGIN_REV=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$BASE_DEFAULT^{commit}" 2>/dev/null || true)
+    BASE_REV=""
+    [ -z "$SPAWN_BASE" ] || BASE_REV=$(git -C "$WT" rev-parse --verify --quiet "$SPAWN_BASE^{commit}" 2>/dev/null || true)
+    if [ -z "$SPAWN_BASE" ]; then
+      BASE_UNVERIFIED="task $ID records no spawn base"
+    elif [ -z "$BASE_REV" ]; then
+      BASE_UNVERIFIED="the spawn base recorded for task $ID ($SPAWN_BASE) is not a commit in $WT"
+    elif [ -z "$BASE_ORIGIN_REV" ]; then
+      BASE_UNVERIFIED="origin/${BASE_DEFAULT:-<default>} does not resolve in $WT"
+    fi
+  fi
+  if [ -n "$BASE_UNVERIFIED" ]; then
+    echo "note: $BASE_UNVERIFIED, and mode=$MODE opens a pull request against origin; promoting anyway, but confirm by hand that this task's base carries nothing origin has not seen" >&2
+  else
+    BASE_UNPUSHED=$(git -C "$WT" rev-list --count "$BASE_ORIGIN_REV..$BASE_REV" 2>/dev/null || true)
+    case "$BASE_UNPUSHED" in ''|*[!0-9]*) BASE_UNPUSHED=0 ;; esac
+    if [ "$BASE_UNPUSHED" -gt 0 ]; then
+      if [ "$BASE_UNPUSHED" -eq 1 ]; then BASE_UNIT=commit; else BASE_UNIT=commits; fi
+      echo "error: the base task $ID was spawned from carries $BASE_UNPUSHED $BASE_UNIT origin/$BASE_DEFAULT does not, and mode=$MODE opens a pull request against origin; refusing to promote rather than publish that unpushed local history inside the PR" >&2
+      exit 1
+    fi
+  fi
+fi
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"

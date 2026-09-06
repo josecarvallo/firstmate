@@ -169,8 +169,31 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_delivery_mode_selects_the_same_base_as_spawn() {
+  local case_dir out
+  case_dir=$(make_case local-base)
+  printf 'local landing\n' > "$case_dir/project/local.txt"
+  git -C "$case_dir/project" add local.txt
+  git -C "$case_dir/project" commit -qm "local landing"
+  printf 'task change\n' > "$case_dir/wt/task.txt"
+  git -C "$case_dir/wt" add task.txt
+  git -C "$case_dir/wt" commit -qm "task change"
+
+  write_task_meta "$case_dir" "mode=local-only"
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+  assert_contains "$out" "diff base: main" \
+    "local-only review did not use the primary checkout's newer base"
+
+  write_task_meta "$case_dir" "mode=direct-PR"
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+  assert_contains "$out" "diff base: origin/main" \
+    "PR review did not stay anchored on the forge tip"
+  pass "fm-review-diff reads the shared delivery rule used by spawn and promotion"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_delivery_mode_selects_the_same_base_as_spawn

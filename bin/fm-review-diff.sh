@@ -2,8 +2,9 @@
 # Review a crewmate branch against the authoritative base.
 #
 # Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# helper compares pull-request deliveries against origin/<default> after fetching
+# it. Other tasks use whichever of that tip and the local default branch contains
+# the other, matching the base selected by fm-spawn.sh.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -18,6 +19,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-delivery-lib.sh
+. "$SCRIPT_DIR/fm-delivery-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -122,6 +125,7 @@ resolve_pr_head() {
   return 1
 }
 
+MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 COMPARE_REF=$BRANCH
@@ -133,11 +137,28 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
+resolve_review_base() {
+  local origin_rev local_rev
+  origin_rev=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT^{commit}" 2>/dev/null || true)
+  [ -n "$origin_rev" ] || { printf '%s' "$DEFAULT"; return 0; }
+  if fm_delivery_opens_pull_request "$MODE"; then
+    printf '%s' "origin/$DEFAULT"
+    return 0
+  fi
+  local_rev=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" 2>/dev/null || true)
+  [ -n "$local_rev" ] || { printf '%s' "origin/$DEFAULT"; return 0; }
+  if git -C "$WT" merge-base --is-ancestor "$local_rev" "$origin_rev" 2>/dev/null; then
+    printf '%s' "origin/$DEFAULT"
+  else
+    printf '%s' "$DEFAULT"
+  fi
+}
+
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  BASE=$(resolve_review_base)
 else
   BASE="$DEFAULT"
 fi

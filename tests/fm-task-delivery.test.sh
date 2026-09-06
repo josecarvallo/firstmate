@@ -283,6 +283,39 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+test_promote_refuses_a_pr_contract_on_an_unpublished_base() {
+  local root home project origin wt base out status
+  root="$TMP_ROOT/promote-unpublished"
+  home="$root/home"
+  project="$root/project"
+  origin="$root/origin.git"
+  wt="$root/wt"
+  mkdir -p "$home/state"
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  git -C "$project" fetch --quiet origin
+  printf 'local only\n' > "$project/local.txt"
+  git -C "$project" add local.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm local-only
+  base=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$wt" "$base"
+  printf 'window=fm-promote-u1\nkind=scout\nworktree=%s\nbase=%s\n' "$wt" "$base" \
+    > "$home/state/promote-u1.meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-u1 --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted a base origin has not seen"
+  assert_contains "$out" "carries 1 commit origin/main does not" \
+    "promotion refusal did not report the unpublished commit count"
+  assert_grep 'kind=scout' "$home/state/promote-u1.meta" \
+    "refused promotion still changed the task kind"
+  pass "fm-promote: a PR contract cannot silently inherit a locally landed base"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -323,5 +356,6 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_refuses_a_pr_contract_on_an_unpublished_base
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"
