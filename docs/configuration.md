@@ -213,6 +213,11 @@ Because firstmate always supplies `--intent`, that command is a baseline and the
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
+At each locked session start, bootstrap runs a bounded cleanup of Compose projects whose labeled containers were left by vanished no-mistakes validation worktrees.
+It acts only when every currently labeled container in a project belongs beneath the exact local no-mistakes worktree root and every referenced worktree is gone, then revalidates that ownership immediately before removing the explicit containers and their Compose-labeled networks.
+It never prunes Docker broadly or removes volumes or images; live siblings and unsafe or unreadable ownership leave the entire project untouched, while inventory, timeout, and cleanup failures print `NO_MISTAKES_DOCKER` diagnostics.
+[`bin/fm-nm-compose-reap.sh`](../bin/fm-nm-compose-reap.sh)'s header owns the exact discovery, revalidation, output, and failure contracts.
+
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
 Domain-local preferences for one captain's fleet live locally in each home's `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
