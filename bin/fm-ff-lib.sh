@@ -55,14 +55,22 @@ default_branch() {
   return 1
 }
 
+refresh_remote_tracking_branch() {
+  local dir=$1 remote=$2 branch=$3
+  git -C "$dir" check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || return 1
+  git -C "$dir" fetch --quiet "$remote" \
+    "+refs/heads/$branch:refs/remotes/$remote/$branch" >/dev/null 2>&1
+}
+
 remote_default_branch() {
-  local dir=$1 remote=$2 ref
-  git -C "$dir" remote set-head "$remote" --auto >/dev/null 2>&1 || return 1
-  ref=$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
-  case "$ref" in
-    "$remote/"?*) printf '%s\n' "${ref#"$remote/"}" ;;
-    *) return 1 ;;
-  esac
+  local dir=$1 remote=$2 refs branch
+  refs=$(git -C "$dir" ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
+  branch=$(printf '%s\n' "$refs" \
+    | sed -n 's#^ref: refs/heads/\(.*\)[[:space:]]HEAD$#\1#p' | head -1)
+  [ -n "$branch" ] || return 1
+  refresh_remote_tracking_branch "$dir" "$remote" "$branch" || return 1
+  git -C "$dir" remote set-head "$remote" "$branch" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$branch"
 }
 
 # Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD

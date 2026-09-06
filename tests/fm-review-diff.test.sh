@@ -197,11 +197,17 @@ test_review_refreshes_origin_default_branch_ownership() {
   publisher="$case_dir/publisher"
   git clone -q "$case_dir/origin.git" "$publisher"
   git -C "$publisher" checkout -q -b stable
+  git -C "$publisher" push -q origin stable
+  git -C "$case_dir/project" fetch -q origin '+refs/heads/stable:refs/remotes/origin/stable'
+  git -C "$case_dir/project" config --unset-all remote.origin.fetch
+  git -C "$case_dir/project" config --add remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
   printf 'stable base\n' > "$publisher/stable.txt"
   git -C "$publisher" add stable.txt
   git -C "$publisher" commit -qm "stable base"
   git -C "$publisher" push -q origin stable
   git --git-dir="$case_dir/origin.git" symbolic-ref HEAD refs/heads/stable
+  [ "$(git -C "$case_dir/wt" rev-parse origin/stable)" != "$(git -C "$publisher" rev-parse HEAD)" ] \
+    || fail "the restrictive-refspec review fixture did not leave origin/stable stale"
   printf 'task change\n' > "$case_dir/wt/task.txt"
   git -C "$case_dir/wt" add task.txt
   git -C "$case_dir/wt" commit -qm "task change"

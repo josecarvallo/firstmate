@@ -151,7 +151,14 @@ test_refreshes_target_default_branch_after_fetch() {
   git -C "$w/work" fetch -q upstream
   git -C "$w/work" fetch -q origin
   git -C "$w/work" remote set-head origin main
+  git -C "$w/work" config --unset-all remote.upstream.fetch
+  git -C "$w/work" config --add remote.upstream.fetch '+refs/heads/main:refs/remotes/upstream/main'
+  git -C "$w/work" config --unset-all remote.origin.fetch
+  git -C "$w/work" config --add remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
   advance "$w" original B stable
+  [ "$(git -C "$w/work" rev-parse upstream/stable)" != \
+    "$(git --git-dir="$w/original.git" rev-parse stable)" ] \
+    || fail "the restrictive-refspec fork-sync fixture did not leave upstream/stable stale"
 
   out=$(run_sync "$w" --apply)
 
@@ -171,7 +178,15 @@ test_explicit_branch_overrides_target_default() {
   git --git-dir="$w/original.git" branch stable main
   git --git-dir="$w/fork.git" branch stable main
   git --git-dir="$w/fork.git" symbolic-ref HEAD refs/heads/stable
+  git -C "$w/work" fetch -q upstream
+  git -C "$w/work" fetch -q origin
+  git -C "$w/work" config --unset-all remote.upstream.fetch
+  git -C "$w/work" config --add remote.upstream.fetch '+refs/heads/stable:refs/remotes/upstream/stable'
+  git -C "$w/work" config --unset-all remote.origin.fetch
+  git -C "$w/work" config --add remote.origin.fetch '+refs/heads/stable:refs/remotes/origin/stable'
   advance "$w" original B main
+  [ "$(git -C "$w/work" rev-parse upstream/main)" != "$(orig_main "$w")" ] \
+    || fail "the explicit-branch fixture did not leave upstream/main stale"
 
   out=$(run_sync "$w" --branch main --apply)
 

@@ -469,6 +469,10 @@ test_promote_refreshes_origin_default_branch_ownership() {
   git -C "$project" remote set-head origin main
   git clone --quiet "$origin" "$publisher"
   git -C "$publisher" checkout -q -b stable
+  git -C "$publisher" push -q origin stable
+  git -C "$project" fetch -q origin '+refs/heads/stable:refs/remotes/origin/stable'
+  git -C "$project" config --unset-all remote.origin.fetch
+  git -C "$project" config --add remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
   printf 'stable\n' > "$publisher/stable.txt"
   git -C "$publisher" add stable.txt
   git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm stable
@@ -476,6 +480,8 @@ test_promote_refreshes_origin_default_branch_ownership() {
   stable=$(git -C "$publisher" rev-parse HEAD)
   git --git-dir="$origin" symbolic-ref HEAD refs/heads/stable
   git -C "$project" worktree add --quiet --detach "$wt" "$base"
+  [ "$(git -C "$wt" rev-parse origin/stable)" != "$stable" ] \
+    || fail "the restrictive-refspec promotion fixture did not leave origin/stable stale"
   printf 'window=fm-promote-default\nkind=scout\nworktree=%s\nbase=%s\n' "$wt" "$base" \
     > "$home/state/promote-default.meta"
 

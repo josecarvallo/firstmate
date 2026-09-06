@@ -34,6 +34,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -112,15 +114,19 @@ done
 # Resolve the branch only after refreshing both remotes. An explicit branch is
 # authoritative; otherwise the target remote's current HEAD is authoritative.
 if [ -z "$BRANCH" ]; then
-  if ! git -C "$FM_ROOT" remote set-head "$TO" --auto >/dev/null 2>&1; then
+  if ! BRANCH=$(remote_default_branch "$FM_ROOT" "$TO"); then
     echo "fm-fork-sync: could not resolve $TO's current default branch; nothing changed" >&2
     exit 2
   fi
-  BRANCH=$(git -C "$FM_ROOT" symbolic-ref --quiet --short "refs/remotes/$TO/HEAD" 2>/dev/null | sed "s#^$TO/##" || true)
-  if [ -z "$BRANCH" ]; then
-    echo "fm-fork-sync: could not read $TO's current default branch; nothing changed" >&2
+else
+  if ! refresh_remote_tracking_branch "$FM_ROOT" "$TO" "$BRANCH"; then
+    echo "fm-fork-sync: could not refresh $TO/$BRANCH; nothing changed" >&2
     exit 2
   fi
+fi
+if ! refresh_remote_tracking_branch "$FM_ROOT" "$FROM" "$BRANCH"; then
+  echo "fm-fork-sync: could not refresh $FROM/$BRANCH; nothing changed" >&2
+  exit 2
 fi
 
 from_ref="$FROM/$BRANCH"

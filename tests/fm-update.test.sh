@@ -369,8 +369,12 @@ test_config_remote_refreshes_its_own_default_branch() {
   git -C "$w/main" fetch -q fork
   git -C "$w/main" remote set-head fork main
   git -C "$w/main" checkout -q -b stable fork/stable
+  git -C "$w/main" config --unset-all remote.fork.fetch
+  git -C "$w/main" config --add remote.fork.fetch '+refs/heads/main:refs/remotes/fork/main'
   bump_fork_branch "$w" stable
   point_at_fork "$w/main"
+  [ "$(git -C "$w/main" rev-parse fork/stable)" != "$(git --git-dir="$w/fork.git" rev-parse stable)" ] \
+    || fail "the restrictive-refspec update fixture did not leave fork/stable stale"
 
   out=$(run_update "$w")
 

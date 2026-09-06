@@ -132,9 +132,10 @@ else
   BASE_CACHED_DEFAULT=$(default_branch "$WT" 2>/dev/null || true)
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     if git -C "$WT" fetch --quiet --prune origin; then
-      BASE_DEFAULT=$(remote_default_branch "$WT" origin 2>/dev/null || true)
-      [ -n "$BASE_DEFAULT" ] \
-        || ORIGIN_REFRESH_ERROR="could not resolve origin's current default branch for task $ID"
+      if ! BASE_DEFAULT=$(remote_default_branch "$WT" origin); then
+        echo "error: could not resolve and refresh origin's current default branch for task $ID; nothing was changed" >&2
+        exit 1
+      fi
     else
       ORIGIN_REFRESH_ERROR="could not refresh origin/${BASE_CACHED_DEFAULT:-<default>} for task $ID"
     fi
