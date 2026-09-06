@@ -58,6 +58,12 @@ test_family_selection() {
   listed=$("$RUNNER" --list --family session-bootstrap)
   assert_contains "$listed" "tests/fm-fork-sync.test.sh" \
     "session-bootstrap must classify fork-sync coverage"
+  listed=$("$RUNNER" --list --family backend-dispatch)
+  assert_contains "$listed" "tests/fm-spawn-pool-base-freshen.test.sh" \
+    "backend-dispatch must classify pooled-base coverage"
+  listed=$("$RUNNER" --list --family pr-forge)
+  assert_contains "$listed" "tests/fm-teardown-docker-stack.test.sh" \
+    "pr-forge must classify docker teardown coverage"
   pass "family selection returns a proper subset of the suite"
 }
 
@@ -108,8 +114,10 @@ init_changed_fixture_repo() {
     fm-fork-sync.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
+    fm-spawn-pool-base-freshen.test.sh \
     fm-pr-merge.test.sh \
     fm-review-diff.test.sh \
+    fm-teardown-docker-stack.test.sh \
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
@@ -123,6 +131,8 @@ init_changed_fixture_repo() {
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/fm-ff-lib.sh"
+  : >"$repo/bin/fm-spawn.sh"
+  : >"$repo/bin/fm-teardown.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -150,8 +160,21 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-update.test.sh" "ff helper selects update coverage"
   assert_contains "$listed" "tests/fm-fork-sync.test.sh" "ff helper selects fork-sync coverage"
   assert_contains "$listed" "tests/fm-review-diff.test.sh" "ff helper selects review-diff coverage"
+  assert_contains "$listed" "tests/fm-spawn-pool-base-freshen.test.sh" "ff helper selects pooled-base coverage"
   git -C "$repo" add bin/fm-ff-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm ff-helper-change
+
+  printf '\n' >>"$repo/bin/fm-spawn.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-spawn-pool-base-freshen.test.sh" "spawn selects pooled-base coverage"
+  git -C "$repo" add bin/fm-spawn.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm spawn-change
+
+  printf '\n' >>"$repo/bin/fm-teardown.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-teardown-docker-stack.test.sh" "teardown selects docker cleanup coverage"
+  git -C "$repo" add bin/fm-teardown.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm teardown-change
 
   printf '\n' >>"$repo/tests/lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)

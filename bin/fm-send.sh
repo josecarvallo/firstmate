@@ -480,17 +480,10 @@ fm_send_verified_transfer_has_task() {  # <status-file> <task-id>
 }
 
 fm_send_hold_resolved_id() {  # <task-id> <decision-key> <status-file>
-  local show id state hold_kind inventory direct_transferred=0
+  local show id state hold_kind
   command -v tasks-axi >/dev/null 2>&1 || return 1
-  inventory=$(fm_send_hold_transfer_inventory "$3" "$2" 2>/dev/null || true)
-  fm_send_verified_transfer_has_task "$3" "$2" && direct_transferred=1
   for id in "$2" "$1-decision-$2"; do
-    if [ "$id" = "$2" ]; then
-      [ "$direct_transferred" -eq 1 ] || fm_send_inventory_has "$inventory" "$id" || continue
-    elif ! fm_send_inventory_has "$inventory" "$id" \
-      && ! fm_send_inventory_has "$inventory" "$2"; then
-      continue
-    fi
+    fm_send_verified_transfer_has_task "$3" "$id" || continue
     show=$( (cd "$FM_HOME" && tasks-axi show "$id" --full) 2>/dev/null ) || continue
     state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
     hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)

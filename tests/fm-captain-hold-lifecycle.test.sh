@@ -1001,6 +1001,24 @@ SH
   assert_contains "$show" "Answer: take the second option" "the chat-answered call lost the captain answer"
   assert_contains "$show" "answer sent to $id" "the chat-answered call lost its channel provenance"
 
+  run_captain "$home" hold "$id-decision-collision" --title "Unrelated collision" \
+    --reason "unrelated captain call" --repo sample >/dev/null \
+    || fail "could not register the unrelated colliding captain call"
+  printf 'needs-decision [key=collision]: original call\ncaptain-held [key=collision]: tracked by collision\n' \
+    >> "$home/state/$id.status"
+  : > "$home/send.log"
+  if env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" "$id" --resolve-key collision "must not land" \
+    > "$home/collision.out" 2> "$home/collision.err"; then
+    fail "a bare transfer key authorized an unrelated derived captain-held task"
+  fi
+  [ ! -s "$home/send.log" ] || fail "the refused colliding answer still reached the worker"
+  show=$(tasks_in "$home" show "$id-decision-collision" --full)
+  assert_contains "$show" "held: yes" "the unrelated colliding captain call was released"
+  assert_contains "$show" "state: queued" "the unrelated colliding captain call was closed"
+
   if env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
