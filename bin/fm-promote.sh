@@ -129,20 +129,30 @@ ORIGIN_REFRESH_ERROR=""
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
   IMPLEMENTATION_BASE_UNVERIFIED="task $ID has no available recorded worktree"
 else
-  BASE_DEFAULT=$(default_branch "$WT" 2>/dev/null || true)
+  BASE_CACHED_DEFAULT=$(default_branch "$WT" 2>/dev/null || true)
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    if git -C "$WT" fetch --quiet --prune origin; then
+      BASE_DEFAULT=$(remote_default_branch "$WT" origin 2>/dev/null || true)
+      [ -n "$BASE_DEFAULT" ] \
+        || ORIGIN_REFRESH_ERROR="could not resolve origin's current default branch for task $ID"
+    else
+      ORIGIN_REFRESH_ERROR="could not refresh origin/${BASE_CACHED_DEFAULT:-<default>} for task $ID"
+    fi
+  else
+    BASE_DEFAULT=$BASE_CACHED_DEFAULT
+    if fm_delivery_opens_pull_request "$MODE"; then
+      ORIGIN_REFRESH_ERROR="task $ID has no origin remote"
+    fi
+  fi
   if [ -z "$BASE_DEFAULT" ]; then
-    IMPLEMENTATION_BASE_UNVERIFIED="the default branch for task $ID cannot be determined"
+    IMPLEMENTATION_BASE_UNVERIFIED=${ORIGIN_REFRESH_ERROR:-"the default branch for task $ID cannot be determined"}
   else
     BASE_LOCAL_REV=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$BASE_DEFAULT^{commit}" 2>/dev/null || true)
-    if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-      if git -C "$WT" fetch --quiet origin "+refs/heads/$BASE_DEFAULT:refs/remotes/origin/$BASE_DEFAULT"; then
-        BASE_ORIGIN_REV=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$BASE_DEFAULT^{commit}" 2>/dev/null || true)
-        [ -n "$BASE_ORIGIN_REV" ] || ORIGIN_REFRESH_ERROR="freshly fetched origin/$BASE_DEFAULT does not resolve in $WT"
-      else
-        ORIGIN_REFRESH_ERROR="could not refresh origin/$BASE_DEFAULT for task $ID"
-      fi
-    elif fm_delivery_opens_pull_request "$MODE"; then
-      ORIGIN_REFRESH_ERROR="task $ID has no origin remote"
+    if [ -z "$ORIGIN_REFRESH_ERROR" ] \
+      && git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+      BASE_ORIGIN_REV=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$BASE_DEFAULT^{commit}" 2>/dev/null || true)
+      [ -n "$BASE_ORIGIN_REV" ] \
+        || ORIGIN_REFRESH_ERROR="freshly fetched origin/$BASE_DEFAULT does not resolve in $WT"
     fi
   fi
 fi

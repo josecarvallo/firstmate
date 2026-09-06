@@ -449,6 +449,50 @@ test_promote_reports_origin_refresh_failure_instead_of_using_cache() {
   pass "fm-promote reports origin refresh failure instead of trusting cache"
 }
 
+test_promote_refreshes_origin_default_branch_ownership() {
+  local root home project origin publisher wt base stable out status
+  root="$TMP_ROOT/promote-origin-default"
+  home="$root/home"
+  project="$root/project"
+  origin="$root/origin.git"
+  publisher="$root/publisher"
+  wt="$root/wt"
+  mkdir -p "$home/state"
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  base=$(git -C "$project" rev-parse HEAD)
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  git -C "$project" fetch --quiet origin
+  git -C "$project" remote set-head origin main
+  git clone --quiet "$origin" "$publisher"
+  git -C "$publisher" checkout -q -b stable
+  printf 'stable\n' > "$publisher/stable.txt"
+  git -C "$publisher" add stable.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm stable
+  git -C "$publisher" push -q origin stable
+  stable=$(git -C "$publisher" rev-parse HEAD)
+  git --git-dir="$origin" symbolic-ref HEAD refs/heads/stable
+  git -C "$project" worktree add --quiet --detach "$wt" "$base"
+  printf 'window=fm-promote-default\nkind=scout\nworktree=%s\nbase=%s\n' "$wt" "$base" \
+    > "$home/state/promote-default.meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-default --mode direct-PR --yolo off 2>&1)
+  status=$?
+
+  expect_code 0 "$status" "promotion should follow origin's refreshed stable default"
+  assert_grep "implementation_base=$stable" "$home/state/promote-default.meta" \
+    "promotion recorded stale origin/main instead of origin/stable"
+  [ "$(git -C "$wt" symbolic-ref --short refs/remotes/origin/HEAD)" = origin/stable ] \
+    || fail "promotion did not refresh origin's default-branch ownership"
+  assert_contains "$out" "reset to recorded implementation base $stable" \
+    "promotion instructions did not use the refreshed origin default"
+  pass "fm-promote refreshes origin default-branch ownership before base selection"
+}
+
 test_promote_records_the_local_implementation_base() {
   local root home project origin wt scout_base implementation_base out status
   root="$TMP_ROOT/promote-implementation-base"
@@ -531,6 +575,7 @@ test_promote_refuses_a_pr_contract_on_an_unpublished_base
 test_promote_reports_an_unreadable_base_reachability_check
 test_promote_refreshes_origin_before_checking_the_scout_base
 test_promote_reports_origin_refresh_failure_instead_of_using_cache
+test_promote_refreshes_origin_default_branch_ownership
 test_promote_records_the_local_implementation_base
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

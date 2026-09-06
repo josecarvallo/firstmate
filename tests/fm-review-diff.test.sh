@@ -191,6 +191,32 @@ test_delivery_mode_selects_the_same_base_as_spawn() {
   pass "fm-review-diff reads the shared delivery rule used by spawn and promotion"
 }
 
+test_review_refreshes_origin_default_branch_ownership() {
+  local case_dir publisher out
+  case_dir=$(make_case refreshed-default)
+  publisher="$case_dir/publisher"
+  git clone -q "$case_dir/origin.git" "$publisher"
+  git -C "$publisher" checkout -q -b stable
+  printf 'stable base\n' > "$publisher/stable.txt"
+  git -C "$publisher" add stable.txt
+  git -C "$publisher" commit -qm "stable base"
+  git -C "$publisher" push -q origin stable
+  git --git-dir="$case_dir/origin.git" symbolic-ref HEAD refs/heads/stable
+  printf 'task change\n' > "$case_dir/wt/task.txt"
+  git -C "$case_dir/wt" add task.txt
+  git -C "$case_dir/wt" commit -qm "task change"
+  write_task_meta "$case_dir" "mode=direct-PR"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" "diff base: origin/stable" \
+    "review used stale origin/main instead of origin/stable"
+  assert_contains "$out" "task.txt" "review omitted the task change above the refreshed base"
+  [ "$(git -C "$case_dir/wt" symbolic-ref --short refs/remotes/origin/HEAD)" = origin/stable ] \
+    || fail "review did not refresh origin's default-branch ownership"
+  pass "fm-review-diff refreshes origin default-branch ownership before base selection"
+}
+
 test_non_pr_review_uses_the_recorded_spawn_base_after_candidate_divergence() {
   local case_dir publisher base out
   case_dir=$(make_case recorded-base)
@@ -280,6 +306,7 @@ test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_delivery_mode_selects_the_same_base_as_spawn
+test_review_refreshes_origin_default_branch_ownership
 test_non_pr_review_uses_the_recorded_spawn_base_after_candidate_divergence
 test_promoted_non_pr_review_uses_the_implementation_base
 test_promoted_non_pr_review_refuses_missing_implementation_provenance

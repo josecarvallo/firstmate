@@ -22,6 +22,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-delivery-lib.sh
 . "$SCRIPT_DIR/fm-delivery-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -53,23 +55,15 @@ PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 [ -d "$WT" ] || { echo "error: worktree for task $ID is missing: $WT" >&2; exit 1; }
 [ -d "$PROJ" ] || { echo "error: project for task $ID is missing: $PROJ" >&2; exit 1; }
 
-default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
-}
-
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+  git -C "$WT" fetch --quiet --prune origin \
+    || { echo "error: cannot refresh origin before resolving its current default branch for $PROJ" >&2; exit 1; }
+  DEFAULT=$(remote_default_branch "$WT" origin) \
+    || { echo "error: cannot resolve origin's current default branch for $PROJ" >&2; exit 1; }
+else
+  DEFAULT=$(default_branch "$PROJ") \
+    || { echo "error: cannot determine default branch for $PROJ; expected main or master" >&2; exit 1; }
+fi
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -182,11 +176,6 @@ resolve_review_base() {
   fi
 }
 
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
-  # Update the remote-tracking ref itself; a bare single-branch fetch can leave
-  # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-fi
 BASE=$(resolve_review_base)
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }

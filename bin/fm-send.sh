@@ -466,13 +466,29 @@ fm_send_inventory_has() {  # <comma-list> <task-id>
   esac
 }
 
+fm_send_verified_transfer_has_task() {  # <status-file> <task-id>
+  local file=$1 task_id=$2 line key inventory held
+  [ -f "$file" ] && [ -r "$file" ] && [ ! -L "$file" ] || return 1
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$(status_line_verb "$line")" = "$held" ] || continue
+    key=$(_fm_decision_key "$line") || continue
+    inventory=$(fm_send_hold_transfer_inventory "$file" "$key") || continue
+    fm_send_inventory_has "$inventory" "$task_id" && return 0
+  done < "$file"
+  return 1
+}
+
 fm_send_hold_resolved_id() {  # <task-id> <decision-key> <status-file>
-  local show id state hold_kind inventory
+  local show id state hold_kind inventory direct_transferred=0
   command -v tasks-axi >/dev/null 2>&1 || return 1
-  inventory=$(fm_send_hold_transfer_inventory "$3" "$2") || return 1
+  inventory=$(fm_send_hold_transfer_inventory "$3" "$2" 2>/dev/null || true)
+  fm_send_verified_transfer_has_task "$3" "$2" && direct_transferred=1
   for id in "$2" "$1-decision-$2"; do
-    if ! fm_send_inventory_has "$inventory" "$id" \
-      && { [ "$id" = "$2" ] || ! fm_send_inventory_has "$inventory" "$2"; }; then
+    if [ "$id" = "$2" ]; then
+      [ "$direct_transferred" -eq 1 ] || fm_send_inventory_has "$inventory" "$id" || continue
+    elif ! fm_send_inventory_has "$inventory" "$id" \
+      && ! fm_send_inventory_has "$inventory" "$2"; then
       continue
     fi
     show=$( (cd "$FM_HOME" && tasks-axi show "$id" --full) 2>/dev/null ) || continue
