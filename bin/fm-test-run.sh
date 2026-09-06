@@ -1003,6 +1003,11 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       printf '%s\n' pr-forge
       ;;
+    bin/fm-project-depth-lib.sh)
+      printf '%s\n' session-bootstrap
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      ;;
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
