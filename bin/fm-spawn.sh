@@ -1773,8 +1773,15 @@ resolve_spawn_worktree_base() {  # <worktree> <primary-checkout> <default> <orig
   fi
   primary_default=$(default_branch "$primary" 2>/dev/null || printf '%s' "$default")
   if fm_delivery_opens_pull_request "$mode"; then
-    ahead=$(git -C "$worktree" rev-list --count "$origin_rev..$primary_rev" 2>/dev/null || true)
-    case "$ahead" in ''|*[!0-9]*) ahead=0 ;; esac
+    if ! ahead=$(git -C "$worktree" rev-list --count "$origin_rev..$primary_rev" 2>/dev/null); then
+      SPAWN_BASE_WITHHELD="$primary_default in the primary checkout carries an unknown number of commits origin/$default does not because reachability could not be measured, but mode=$mode opens a pull request against origin; starting from origin's tip so those unpushed commits cannot ride along inside it"
+      return 0
+    fi
+    case "$ahead" in ''|*[!0-9]*)
+      SPAWN_BASE_WITHHELD="$primary_default in the primary checkout carries an unknown number of commits origin/$default does not because git returned an invalid count '$ahead', but mode=$mode opens a pull request against origin; starting from origin's tip so those unpushed commits cannot ride along inside it"
+      return 0
+      ;;
+    esac
     if [ "$ahead" -eq 1 ]; then unit=commit; else unit=commits; fi
     SPAWN_BASE_WITHHELD="$primary_default in the primary checkout carries $ahead $unit origin/$default does not, but mode=$mode opens a pull request against origin; starting from origin's tip so those unpushed commits cannot ride along inside it"
     return 0

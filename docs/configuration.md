@@ -149,6 +149,7 @@ The value is read from the checkout's own `config/` dir (each home's config), or
 [`bin/fm-ff-lib.sh`](../bin/fm-ff-lib.sh)'s `resolve_update_remote` owns the exact resolution and safety rules; every existing fast-forward guard (ff-only, never force/stash, skip a dirty/diverged/wrong-branch/offline home) is unchanged and applies to the configured remote.
 
 `config/fork-feed-source` (default `upstream`) and `config/fork-feed-target` (default `origin`) are the per-home defaults for [`bin/fm-fork-sync.sh`](../bin/fm-fork-sync.sh), the on-demand step that feeds the fork from the original: it fast-forwards the fork's branch to the original's tip when that is clean, and otherwise publishes an integration branch for a reviewed merge, never forcing and never discarding the fork's own commits.
+`bin/fm-repoint-home.sh` remaps explicit values in all three files when their named remotes are renamed, and refuses the migration before changing remotes when an explicit value names a missing remote.
 `bin/fm-fork-sync.sh --help` and `bin/fm-repoint-home.sh --help` own the exact flags and the reversible per-home re-pointing procedure; the overall model lives in [CONTRIBUTING.md](../CONTRIBUTING.md) ("Running a fleet from your own fork").
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)

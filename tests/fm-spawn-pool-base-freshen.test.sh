@@ -127,11 +127,16 @@ range=
 for arg in "$@"; do
   [ "$prev" = -C ] && dir=$arg
   [ "$arg" = rev-list ] && is_rev_list=1
-  case "$arg" in HEAD..*|*..HEAD) range=$arg ;; esac
+  case "$arg" in *..*) range=$arg ;; esac
   prev=$arg
 done
-if [ "$is_rev_list" -eq 1 ] && [ "$dir" = "${FAIL_REV_LIST_DIR:-}" ] && [ -n "$range" ]; then
-  exit 70
+if [ "$is_rev_list" -eq 1 ] && [ "$dir" = "${FAIL_REV_LIST_DIR:-}" ]; then
+  if [ -n "${FAIL_REV_LIST_RANGE:-}" ] && [ "$range" = "$FAIL_REV_LIST_RANGE" ]; then
+    exit 70
+  fi
+  if [ -z "${FAIL_REV_LIST_RANGE:-}" ]; then
+    case "$range" in HEAD..*|*..HEAD) exit 70 ;; esac
+  fi
 fi
 exec "$real" "$@"
 SH
@@ -407,6 +412,32 @@ test_pr_delivery_keeps_origin_and_reports_withheld_history() {
   pass "a PR delivery keeps origin's tip and reports the excluded local history"
 }
 
+test_pr_delivery_reports_an_unknown_withheld_count() {
+  local rec id out status origin_tip primary range
+  id='pool-pr-unknown-withheld-r20'
+  rec=$(make_local_only_case pr-unknown-withheld "$id" 2)
+  read_case_record "$rec"
+  origin_tip=$(git -C "$POOL_DIR" rev-parse origin/main)
+  primary=$(git -C "$PROJECT_DIR" rev-parse main)
+  range="$origin_tip..$primary"
+  install_rev_list_failure_git "$FAKEBIN_DIR"
+
+  out=$(REAL_GIT_FOR_TEST="$(command -v git)" FAIL_REV_LIST_DIR="$POOL_DIR" \
+    FAIL_REV_LIST_RANGE="$range" run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+
+  expect_code 0 "$status" "PR spawn should keep the safe origin base when the withheld count is unknown"
+  assert_contains "$out" "carries an unknown number of commits origin/main does not" \
+    "PR spawn fabricated a zero withheld count"
+  assert_contains "$out" "reachability could not be measured" \
+    "PR spawn did not explain why the withheld count is unknown"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$origin_tip" ] \
+    || fail "PR spawn left the safe origin base after the withheld count failed"
+  assert_grep "base=$origin_tip" "$HOME_DIR/state/$id.meta" \
+    "PR spawn recorded a base other than origin after the withheld count failed"
+  pass "a failed withheld-history count stays unknown and visible"
+}
+
 test_pr_delivery_refuses_to_reset_a_slot_backwards() {
   local rec id out status primary before
   id='pool-pr-backwards-r18'
@@ -481,6 +512,7 @@ test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_local_only_uses_and_reports_the_primary_tip
 test_pr_delivery_keeps_origin_and_reports_withheld_history
+test_pr_delivery_reports_an_unknown_withheld_count
 test_pr_delivery_refuses_to_reset_a_slot_backwards
 test_unreadable_reachability_refuses_without_resetting_the_slot
 test_diverged_local_candidates_refuse_without_moving_the_slot

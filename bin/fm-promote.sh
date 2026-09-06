@@ -13,8 +13,10 @@
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
 # A scout records the base it was created from. Promotion to a PR-opening mode
-# refuses that base when origin cannot reach it, preventing local-only history
-# from riding into the pull request. Missing evidence is reported, not hidden.
+# refuses that base when freshly fetched origin cannot reach it, preventing
+# local-only history from riding into the pull request. Promotion also records
+# the implementation base selected for the worker's reset. Missing evidence is
+# reported, not hidden.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 
@@ -118,20 +120,82 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 SPAWN_BASE=$(grep '^base=' "$META" | tail -1 | cut -d= -f2- || true)
+IMPLEMENTATION_BASE=""
+IMPLEMENTATION_BASE_UNVERIFIED=""
+BASE_DEFAULT=""
+BASE_ORIGIN_REV=""
+BASE_LOCAL_REV=""
+ORIGIN_REFRESH_ERROR=""
+if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+  IMPLEMENTATION_BASE_UNVERIFIED="task $ID has no available recorded worktree"
+else
+  BASE_DEFAULT=$(default_branch "$WT" 2>/dev/null || true)
+  if [ -z "$BASE_DEFAULT" ]; then
+    IMPLEMENTATION_BASE_UNVERIFIED="the default branch for task $ID cannot be determined"
+  else
+    BASE_LOCAL_REV=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$BASE_DEFAULT^{commit}" 2>/dev/null || true)
+    if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+      if git -C "$WT" fetch --quiet origin "+refs/heads/$BASE_DEFAULT:refs/remotes/origin/$BASE_DEFAULT"; then
+        BASE_ORIGIN_REV=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$BASE_DEFAULT^{commit}" 2>/dev/null || true)
+        [ -n "$BASE_ORIGIN_REV" ] || ORIGIN_REFRESH_ERROR="freshly fetched origin/$BASE_DEFAULT does not resolve in $WT"
+      else
+        ORIGIN_REFRESH_ERROR="could not refresh origin/$BASE_DEFAULT for task $ID"
+      fi
+    elif fm_delivery_opens_pull_request "$MODE"; then
+      ORIGIN_REFRESH_ERROR="task $ID has no origin remote"
+    fi
+  fi
+fi
+
+if fm_delivery_opens_pull_request "$MODE"; then
+  if [ -n "$BASE_ORIGIN_REV" ]; then
+    IMPLEMENTATION_BASE=$BASE_ORIGIN_REV
+  elif [ -z "$IMPLEMENTATION_BASE_UNVERIFIED" ]; then
+    IMPLEMENTATION_BASE_UNVERIFIED=${ORIGIN_REFRESH_ERROR:-"origin/${BASE_DEFAULT:-<default>} does not resolve in $WT"}
+  fi
+elif [ -z "$IMPLEMENTATION_BASE_UNVERIFIED" ]; then
+  if [ -n "$ORIGIN_REFRESH_ERROR" ]; then
+    IMPLEMENTATION_BASE_UNVERIFIED=$ORIGIN_REFRESH_ERROR
+  elif [ -z "$BASE_ORIGIN_REV" ]; then
+    if [ -n "$BASE_LOCAL_REV" ]; then
+      IMPLEMENTATION_BASE=$BASE_LOCAL_REV
+    else
+      IMPLEMENTATION_BASE_UNVERIFIED="neither ${BASE_DEFAULT:-<default>} nor origin/${BASE_DEFAULT:-<default>} resolves in $WT"
+    fi
+  elif [ -z "$BASE_LOCAL_REV" ]; then
+    IMPLEMENTATION_BASE=$BASE_ORIGIN_REV
+  elif git -C "$WT" merge-base --is-ancestor "$BASE_LOCAL_REV" "$BASE_ORIGIN_REV" 2>/dev/null; then
+    IMPLEMENTATION_BASE=$BASE_ORIGIN_REV
+  else
+    ANCESTOR_STATUS=$?
+    if [ "$ANCESTOR_STATUS" -ne 1 ]; then
+      IMPLEMENTATION_BASE_UNVERIFIED="could not compare $BASE_DEFAULT with origin/$BASE_DEFAULT for task $ID"
+    elif git -C "$WT" merge-base --is-ancestor "$BASE_ORIGIN_REV" "$BASE_LOCAL_REV" 2>/dev/null; then
+      IMPLEMENTATION_BASE=$BASE_LOCAL_REV
+    else
+      ANCESTOR_STATUS=$?
+      if [ "$ANCESTOR_STATUS" -eq 1 ]; then
+        IMPLEMENTATION_BASE_UNVERIFIED="$BASE_DEFAULT and origin/$BASE_DEFAULT have diverged for task $ID"
+      else
+        IMPLEMENTATION_BASE_UNVERIFIED="could not compare origin/$BASE_DEFAULT with $BASE_DEFAULT for task $ID"
+      fi
+    fi
+  fi
+fi
+
 if fm_delivery_opens_pull_request "$MODE"; then
   BASE_UNVERIFIED=""
   if [ -z "$WT" ] || [ ! -d "$WT" ]; then
     BASE_UNVERIFIED="task $ID has no available recorded worktree"
   else
-    BASE_DEFAULT=$(default_branch "$WT" 2>/dev/null || true)
-    BASE_ORIGIN_REV=""
-    [ -z "$BASE_DEFAULT" ] || BASE_ORIGIN_REV=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$BASE_DEFAULT^{commit}" 2>/dev/null || true)
     BASE_REV=""
     [ -z "$SPAWN_BASE" ] || BASE_REV=$(git -C "$WT" rev-parse --verify --quiet "$SPAWN_BASE^{commit}" 2>/dev/null || true)
     if [ -z "$SPAWN_BASE" ]; then
       BASE_UNVERIFIED="task $ID records no spawn base"
     elif [ -z "$BASE_REV" ]; then
       BASE_UNVERIFIED="the spawn base recorded for task $ID ($SPAWN_BASE) is not a commit in $WT"
+    elif [ -n "$ORIGIN_REFRESH_ERROR" ]; then
+      BASE_UNVERIFIED=$ORIGIN_REFRESH_ERROR
     elif [ -z "$BASE_ORIGIN_REV" ]; then
       BASE_UNVERIFIED="origin/${BASE_DEFAULT:-<default>} does not resolve in $WT"
     fi
@@ -154,12 +218,18 @@ if fm_delivery_opens_pull_request "$MODE"; then
   fi
 fi
 
+if ! fm_delivery_opens_pull_request "$MODE" && [ -z "$IMPLEMENTATION_BASE" ]; then
+  echo "note: $IMPLEMENTATION_BASE_UNVERIFIED; promotion will record no implementation base, so review will refuse until that provenance is recorded" >&2
+fi
+
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^promoted_from_scout=' -e '^implementation_base=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  echo "promoted_from_scout=1"
+  [ -z "$IMPLEMENTATION_BASE" ] || echo "implementation_base=$IMPLEMENTATION_BASE"
 } >> "$TMP"
 mv "$TMP" "$META"
 TMP=
@@ -168,4 +238,8 @@ META_LOCK_HELD=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+if [ -n "$IMPLEMENTATION_BASE" ]; then
+  echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to recorded implementation base $IMPLEMENTATION_BASE; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+else
+  echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; resolve and record implementation_base= before resetting to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+fi

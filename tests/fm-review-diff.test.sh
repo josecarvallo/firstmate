@@ -224,6 +224,56 @@ test_non_pr_review_uses_the_recorded_spawn_base_after_candidate_divergence() {
   pass "fm-review-diff anchors non-PR work to the recorded spawn base"
 }
 
+test_promoted_non_pr_review_uses_the_implementation_base() {
+  local case_dir scout_base implementation_base out
+  case_dir=$(make_case promoted-base)
+  scout_base=$(git -C "$case_dir/project" rev-parse main)
+  printf 'local landing\n' > "$case_dir/project/local-only.txt"
+  git -C "$case_dir/project" add local-only.txt
+  git -C "$case_dir/project" commit -qm "local landing"
+  implementation_base=$(git -C "$case_dir/project" rev-parse main)
+  git -C "$case_dir/wt" reset -q --hard "$implementation_base"
+  printf 'task-only\n' > "$case_dir/wt/task-only.txt"
+  git -C "$case_dir/wt" add task-only.txt
+  git -C "$case_dir/wt" commit -qm "promoted task change"
+  write_task_meta "$case_dir" \
+    "kind=ship" \
+    "mode=local-only" \
+    "promoted_from_scout=1" \
+    "base=$scout_base" \
+    "implementation_base=$implementation_base"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" "diff base: $implementation_base" \
+    "promoted review did not use the recorded implementation base"
+  assert_contains "$out" "task-only.txt" \
+    "promoted review omitted the implementation change"
+  assert_not_contains "$out" "local-only.txt" \
+    "promoted review included the unrelated landing between scout and implementation"
+  pass "fm-review-diff uses promoted implementation provenance"
+}
+
+test_promoted_non_pr_review_refuses_missing_implementation_provenance() {
+  local case_dir out status
+  case_dir=$(make_case promoted-missing-base)
+  write_task_meta "$case_dir" \
+    "kind=ship" \
+    "mode=local-only" \
+    "promoted_from_scout=1" \
+    "base=$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "promoted review trusted a stale scout base without implementation provenance"
+  assert_contains "$out" "records no implementation_base=" \
+    "promoted review refusal did not name the missing provenance"
+  pass "fm-review-diff refuses promoted work without implementation provenance"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -231,3 +281,5 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_delivery_mode_selects_the_same_base_as_spawn
 test_non_pr_review_uses_the_recorded_spawn_base_after_candidate_divergence
+test_promoted_non_pr_review_uses_the_implementation_base
+test_promoted_non_pr_review_refuses_missing_implementation_provenance

@@ -132,7 +132,34 @@ fi
 short() { git -C "$FM_ROOT" rev-parse --short "$1"; }
 from_short=$(short "$from_sha")
 to_short=$(short "$to_sha")
-count_range() { git -C "$FM_ROOT" rev-list --count "$1" 2>/dev/null || echo 0; }
+count_range() {
+  local range=$1 count
+  if ! count=$(git -C "$FM_ROOT" rev-list --count "$range" 2>/dev/null); then
+    echo "fm-fork-sync: could not count commit range $range; nothing changed" >&2
+    return 2
+  fi
+  case "$count" in
+    ''|*[!0-9]*)
+      echo "fm-fork-sync: invalid commit count '$count' for range $range; nothing changed" >&2
+      return 2
+      ;;
+  esac
+  printf '%s' "$count"
+}
+
+is_ancestor() {
+  local older=$1 newer=$2 status
+  git -C "$FM_ROOT" merge-base --is-ancestor "$older" "$newer" 2>/dev/null
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$status" -eq 1 ]; then
+    return 1
+  fi
+  echo "fm-fork-sync: could not determine whether $older is an ancestor of $newer; nothing changed" >&2
+  return 2
+}
 
 # --- decide and act --------------------------------------------------------
 
@@ -141,10 +168,10 @@ if [ "$from_sha" = "$to_sha" ]; then
   exit 0
 fi
 
-if git -C "$FM_ROOT" merge-base --is-ancestor "$to_sha" "$from_sha" 2>/dev/null; then
+if is_ancestor "$to_sha" "$from_sha"; then
   # Fork branch is behind the original with NO commits of its own: a clean
   # fast-forward of the fork's branch to the original's tip.
-  n=$(count_range "$to_sha..$from_sha")
+  n=$(count_range "$to_sha..$from_sha") || exit 2
   if [ "$APPLY" != yes ]; then
     echo "fast-forward available: $to_ref can advance $to_short..$from_short ($n commit(s)); run with --apply to feed the fork"
     exit 0
@@ -157,22 +184,28 @@ if git -C "$FM_ROOT" merge-base --is-ancestor "$to_sha" "$from_sha" 2>/dev/null;
   fi
   echo "fm-fork-sync: fast-forward push of $to_ref was refused (the fork moved under us); nothing forced" >&2
   exit 2
+else
+  RELATION_STATUS=$?
+  [ "$RELATION_STATUS" -eq 1 ] || exit 2
 fi
 
-if git -C "$FM_ROOT" merge-base --is-ancestor "$from_sha" "$to_sha" 2>/dev/null; then
+if is_ancestor "$from_sha" "$to_sha"; then
   # Fork branch already contains everything the original has, plus its own work.
   # The original has nothing new to feed.
-  n=$(count_range "$from_sha..$to_sha")
+  n=$(count_range "$from_sha..$to_sha") || exit 2
   echo "up to date: $to_ref is ahead of $from_ref by $n own commit(s); the original has nothing new to feed"
   exit 0
+else
+  RELATION_STATUS=$?
+  [ "$RELATION_STATUS" -eq 1 ] || exit 2
 fi
 
 # Genuine divergence: the original has commits the fork lacks AND the fork has
 # commits the original lacks. A fast-forward would discard the fork's own work,
 # so we never do it. Publish (or describe) an integration branch at the
 # original's tip for a reviewed merge instead.
-ahead=$(count_range "$to_sha..$from_sha")   # commits in original not in fork
-own=$(count_range "$from_sha..$to_sha")      # fork's own commits
+ahead=$(count_range "$to_sha..$from_sha") || exit 2
+own=$(count_range "$from_sha..$to_sha") || exit 2
 integ="integrate-upstream-$from_short"
 if [ "$APPLY" != yes ]; then
   echo "diverged: $from_ref has $ahead commit(s) the fork lacks and $to_ref has $own of its own; run with --apply to publish integration branch $TO/$integ for a reviewed merge (the fork's own commits are never discarded)"

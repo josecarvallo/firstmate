@@ -130,6 +130,8 @@ MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 SPAWN_BASE=$(grep '^base=' "$META" | tail -1 | cut -d= -f2- || true)
+PROMOTED_FROM_SCOUT=$(grep '^promoted_from_scout=' "$META" | tail -1 | cut -d= -f2- || true)
+IMPLEMENTATION_BASE=$(grep '^implementation_base=' "$META" | tail -1 | cut -d= -f2- || true)
 COMPARE_REF=$BRANCH
 if [ -n "$PR_URL" ]; then
   if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
@@ -141,7 +143,19 @@ fi
 
 resolve_review_base() {
   local origin_rev local_rev recorded_rev
-  if ! fm_delivery_opens_pull_request "$MODE" && [ -n "$SPAWN_BASE" ]; then
+  if ! fm_delivery_opens_pull_request "$MODE" && [ "$PROMOTED_FROM_SCOUT" = 1 ]; then
+    [ -n "$IMPLEMENTATION_BASE" ] || {
+      echo "error: promoted task $ID records no implementation_base=; refusing to review against its stale scout spawn base" >&2
+      return 1
+    }
+    recorded_rev=$(git -C "$WT" rev-parse --verify --quiet "$IMPLEMENTATION_BASE^{commit}" 2>/dev/null || true)
+    [ -n "$recorded_rev" ] || {
+      echo "error: recorded implementation base $IMPLEMENTATION_BASE does not resolve in $WT" >&2
+      return 1
+    }
+    printf '%s' "$recorded_rev"
+    return 0
+  elif ! fm_delivery_opens_pull_request "$MODE" && [ -n "$SPAWN_BASE" ]; then
     recorded_rev=$(git -C "$WT" rev-parse --verify --quiet "$SPAWN_BASE^{commit}" 2>/dev/null || true)
     [ -n "$recorded_rev" ] || {
       echo "error: recorded spawn base $SPAWN_BASE does not resolve in $WT" >&2

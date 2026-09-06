@@ -126,6 +126,80 @@ test_fork_url_ignored_when_fork_remote_present() {
   pass "to-fork promotes the existing fork remote and ignores --fork-url, report matches applied"
 }
 
+test_partial_target_layouts_are_not_idempotent_successes() {
+  local w out rc
+  w=$(new_home partial-fork-layout)
+  git -C "$w/home" remote remove fork
+  git -C "$w/home" remote rename origin upstream
+
+  out=$(run to-fork "$w/home"); rc=$?
+  [ "$rc" -eq 2 ] || fail "an upstream-only layout was accepted as fork-as-source"
+  assert_contains "$out" "has no origin remote" \
+    "upstream-only layout refusal did not name the missing origin"
+
+  w=$(new_home partial-origin-layout)
+  git -C "$w/home" remote remove origin
+
+  out=$(run to-origin "$w/home"); rc=$?
+  [ "$rc" -eq 2 ] || fail "a fork-only layout was accepted as original-as-origin"
+  assert_contains "$out" "has no origin remote" \
+    "fork-only layout refusal did not name the missing origin"
+  pass "partial remote layouts fail closed instead of passing idempotence"
+}
+
+test_remote_configuration_is_remapped_reversibly() {
+  local w out
+  w=$(new_home config-roundtrip)
+  mkdir -p "$w/home/config"
+  printf 'fork\n' > "$w/home/config/update-remote"
+  printf 'origin\n' > "$w/home/config/fork-feed-source"
+  printf 'fork\n' > "$w/home/config/fork-feed-target"
+
+  out=$(run to-fork "$w/home")
+  assert_contains "$out" "update-remote: fork -> origin" \
+    "dry run did not show the update remote remap"
+  [ "$(cat "$w/home/config/update-remote")" = fork ] \
+    || fail "dry run changed update-remote"
+
+  out=$(run to-fork "$w/home" --apply)
+  assert_contains "$out" "done:" "to-fork with configuration did not complete"
+  [ "$(cat "$w/home/config/update-remote")" = origin ] \
+    || fail "to-fork left update-remote pointing at the removed fork name"
+  [ "$(cat "$w/home/config/fork-feed-source")" = upstream ] \
+    || fail "to-fork did not preserve the feed source across the origin rename"
+  [ "$(cat "$w/home/config/fork-feed-target")" = origin ] \
+    || fail "to-fork did not preserve the feed target across the fork rename"
+
+  run to-origin "$w/home" --apply >/dev/null
+  [ "$(cat "$w/home/config/update-remote")" = fork ] \
+    || fail "to-origin did not restore update-remote"
+  [ "$(cat "$w/home/config/fork-feed-source")" = origin ] \
+    || fail "to-origin did not restore the feed source"
+  [ "$(cat "$w/home/config/fork-feed-target")" = fork ] \
+    || fail "to-origin did not restore the feed target"
+  pass "remote configuration follows names through a reversible round-trip"
+}
+
+test_missing_configured_remote_refuses_before_repointing() {
+  local w out rc origin_before fork_before
+  w=$(new_home missing-config-remote)
+  mkdir -p "$w/home/config"
+  printf 'missing\n' > "$w/home/config/update-remote"
+  origin_before=$(url "$w/home" origin)
+  fork_before=$(url "$w/home" fork)
+
+  out=$(run to-fork "$w/home" --apply); rc=$?
+
+  [ "$rc" -eq 2 ] || fail "repoint accepted configuration naming a missing remote"
+  assert_contains "$out" "names missing remote 'missing'" \
+    "incompatible configuration refusal did not name the missing remote"
+  [ "$(url "$w/home" origin)" = "$origin_before" ] \
+    || fail "repoint changed origin before rejecting incompatible configuration"
+  [ "$(url "$w/home" fork)" = "$fork_before" ] \
+    || fail "repoint changed fork before rejecting incompatible configuration"
+  pass "incompatible remote configuration refuses before mutation"
+}
+
 test_status_reports_layout
 test_dry_run_mutates_nothing
 test_to_fork_and_roundtrip
@@ -133,5 +207,8 @@ test_idempotent_to_fork
 test_unexpected_state_fails_closed
 test_no_fork_remote_requires_url
 test_fork_url_ignored_when_fork_remote_present
+test_partial_target_layouts_are_not_idempotent_successes
+test_remote_configuration_is_remapped_reversibly
+test_missing_configured_remote_refuses_before_repointing
 
 echo "# all fm-repoint-home tests passed"

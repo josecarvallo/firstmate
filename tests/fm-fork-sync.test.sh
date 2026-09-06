@@ -59,6 +59,24 @@ run_sync() { local w=$1; shift; FM_ROOT_OVERRIDE="$w/work" "$SYNC" "$@" 2>&1; }
 fork_main() { git -C "$1/fork.git" rev-parse main; }
 orig_main() { git -C "$1/original.git" rev-parse main; }
 
+install_git_failure() {
+  local w=$1 fakebin
+  fakebin=$(fm_fakebin "$w/git-failure")
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+real=${REAL_GIT_FOR_TEST:?}
+for arg in "$@"; do
+  if [ "$arg" = "${FAIL_GIT_SUBCOMMAND:-}" ]; then
+    exit 70
+  fi
+done
+exec "$real" "$@"
+SH
+  chmod +x "$fakebin/git"
+  printf '%s\n' "$fakebin"
+}
+
 # --- clean fast-forward: report-only never pushes, --apply advances the fork
 test_clean_ff() {
   local w out before
@@ -147,11 +165,50 @@ test_config_remote_with_internal_whitespace_is_rejected() {
   pass "a configured remote with internal whitespace is rejected"
 }
 
+test_relationship_traversal_failure_refuses_without_publishing() {
+  local w out rc fakebin refs_before
+  w=$(new_world relationship-failure)
+  advance "$w" original B
+  advance "$w" fork X
+  refs_before=$(git -C "$w/fork.git" for-each-ref --format='%(refname) %(objectname)' refs/heads)
+  fakebin=$(install_git_failure "$w")
+
+  out=$(REAL_GIT_FOR_TEST="$(command -v git)" FAIL_GIT_SUBCOMMAND=merge-base \
+    PATH="$fakebin:$PATH" run_sync "$w" --apply); rc=$?
+
+  [ "$rc" -eq 2 ] || fail "relationship traversal failure did not exit 2 (got $rc)"
+  assert_contains "$out" "could not determine whether" \
+    "relationship traversal failure was misclassified as divergence"
+  [ "$(git -C "$w/fork.git" for-each-ref --format='%(refname) %(objectname)' refs/heads)" = "$refs_before" ] \
+    || fail "relationship traversal failure published or moved a fork ref"
+  pass "relationship traversal failure refuses without publishing"
+}
+
+test_count_traversal_failure_refuses_without_fast_forwarding() {
+  local w out rc fakebin fork_before
+  w=$(new_world count-failure)
+  advance "$w" original B
+  fork_before=$(fork_main "$w")
+  fakebin=$(install_git_failure "$w")
+
+  out=$(REAL_GIT_FOR_TEST="$(command -v git)" FAIL_GIT_SUBCOMMAND=rev-list \
+    PATH="$fakebin:$PATH" run_sync "$w" --apply); rc=$?
+
+  [ "$rc" -eq 2 ] || fail "count traversal failure did not exit 2 (got $rc)"
+  assert_contains "$out" "could not count commit range" \
+    "count traversal failure was converted to a fabricated count"
+  [ "$(fork_main "$w")" = "$fork_before" ] \
+    || fail "count traversal failure fast-forwarded the fork"
+  pass "count traversal failure refuses without moving the fork"
+}
+
 test_clean_ff
 test_diverged_never_discards
 test_fork_ahead_nothing_to_feed
 test_already_current
 test_missing_remote_fails_closed
 test_config_remote_with_internal_whitespace_is_rejected
+test_relationship_traversal_failure_refuses_without_publishing
+test_count_traversal_failure_refuses_without_fast_forwarding
 
 echo "# all fm-fork-sync tests passed"

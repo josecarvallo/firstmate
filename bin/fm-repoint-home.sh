@@ -7,9 +7,10 @@
 #   fork-as-source     (after):   origin = <fork>,               upstream = <original>
 # Under the "after" layout fm-update.sh fetches homes from origin (= the fork)
 # with no extra config, and no-mistakes derives its PR base from origin (= the
-# fork the captain can merge). The change is purely a rename/add of git remotes:
-# it never touches the working tree, commits, branches, or any unlanded work, so
-# it is safe on a home with in-flight work and is trivially reversible.
+# fork the captain can merge). The change renames or adds git remotes and remaps
+# explicit per-home remote-name configuration. It never touches tracked files,
+# commits, branches, or any unlanded work, so it is safe on a home with in-flight
+# work and is trivially reversible.
 #
 # This is a SUPERVISED, per-home step. Run `status` to inspect a home, run the
 # transform with NO flag to see exactly what it would do (dry run), and only
@@ -40,7 +41,8 @@ usage:
   to-fork:   origin=<original>,fork=<fork>  ->  origin=<fork>,upstream=<original>
   to-origin: origin=<fork>,upstream=<original>  ->  origin=<original>,fork=<fork>
   No flag = dry run (prints the exact git commands). --apply performs them.
-  Never forces, never touches the working tree, commits, or unlanded work.
+  Explicit update/feed remote configuration is remapped with the remote names.
+  Never forces, never touches tracked files, commits, or unlanded work.
 EOF
 }
 
@@ -48,6 +50,79 @@ die() { echo "fm-repoint-home: $1" >&2; exit 2; }
 
 remote_url() { git -C "$1" remote get-url "$2" 2>/dev/null || true; }
 has_remote() { git -C "$1" remote get-url "$2" >/dev/null 2>&1; }
+
+REMOTE_CONFIG_NAMES=(update-remote fork-feed-source fork-feed-target)
+CONFIG_REMAP_PATHS=()
+CONFIG_REMAP_VALUES=()
+
+config_remote_value() {
+  sed -n '1p' "$1" 2>/dev/null
+}
+
+validate_remote_configs() {
+  local home=$1 name path value
+  for name in "${REMOTE_CONFIG_NAMES[@]}"; do
+    path="$home/config/$name"
+    [ -e "$path" ] || continue
+    [ -f "$path" ] && [ ! -L "$path" ] || die "$path must be a regular file"
+    value=$(config_remote_value "$path")
+    [ -n "$value" ] || continue
+    case "$value" in
+      *[!A-Za-z0-9._-]*) die "$path contains an unsafe remote name: '$value'" ;;
+    esac
+    has_remote "$home" "$value" || die "$path names missing remote '$value'"
+  done
+}
+
+plan_remote_config_remaps() {
+  local home=$1 direction=$2 name path value mapped
+  CONFIG_REMAP_PATHS=()
+  CONFIG_REMAP_VALUES=()
+  for name in "${REMOTE_CONFIG_NAMES[@]}"; do
+    path="$home/config/$name"
+    [ -e "$path" ] || continue
+    [ -f "$path" ] && [ ! -L "$path" ] || die "$path must be a regular file"
+    value=$(config_remote_value "$path")
+    [ -n "$value" ] || continue
+    case "$value" in
+      *[!A-Za-z0-9._-]*) die "$path contains an unsafe remote name: '$value'" ;;
+    esac
+    mapped=$value
+    case "$direction:$value" in
+      to-fork:origin) mapped=upstream ;;
+      to-fork:fork) mapped=origin ;;
+      to-origin:origin) mapped=fork ;;
+      to-origin:upstream) mapped=origin ;;
+      *) has_remote "$home" "$value" || die "$path names missing remote '$value'" ;;
+    esac
+    if [ "$mapped" != "$value" ]; then
+      CONFIG_REMAP_PATHS+=("$path")
+      CONFIG_REMAP_VALUES+=("$mapped")
+    fi
+  done
+}
+
+show_remote_config_remaps() {
+  local i path old
+  for i in "${!CONFIG_REMAP_PATHS[@]}"; do
+    path=${CONFIG_REMAP_PATHS[$i]}
+    old=$(config_remote_value "$path")
+    echo "  remap $path: $old -> ${CONFIG_REMAP_VALUES[$i]}"
+  done
+}
+
+apply_remote_config_remaps() {
+  local i path value tmp
+  for i in "${!CONFIG_REMAP_PATHS[@]}"; do
+    path=${CONFIG_REMAP_PATHS[$i]}
+    value=${CONFIG_REMAP_VALUES[$i]}
+    tmp="$path.tmp.${BASHPID:-$$}"
+    if ! printf '%s\n' "$value" > "$tmp" || ! mv "$tmp" "$path"; then
+      rm -f -- "$tmp"
+      die "could not remap $path"
+    fi
+  done
+}
 
 require_repo() {
   local home=$1
@@ -82,9 +157,9 @@ cmd_status() {
   [ -n "$src" ] || src=origin
   url=$(remote_url "$home" "$src")
   echo "update source: $src${url:+ ($url)}"
-  if has_remote "$home" upstream && ! has_remote "$home" fork; then
+  if has_remote "$home" origin && has_remote "$home" upstream && ! has_remote "$home" fork; then
     echo "layout: fork-as-source (origin is the fork, upstream is the original)"
-  elif has_remote "$home" fork && ! has_remote "$home" upstream; then
+  elif has_remote "$home" origin && has_remote "$home" fork && ! has_remote "$home" upstream; then
     echo "layout: original-as-origin (origin is the original, fork is the fork)"
   else
     echo "layout: unrecognized (inspect the remotes above before re-pointing)"
@@ -96,7 +171,8 @@ cmd_to_fork() {
   local home=$1 fork_url=$2
   require_repo "$home"
   # Idempotent: already fork-as-source.
-  if has_remote "$home" upstream && ! has_remote "$home" fork; then
+  if has_remote "$home" origin && has_remote "$home" upstream && ! has_remote "$home" fork; then
+    validate_remote_configs "$home"
     echo "already fork-as-source: $home (origin is the fork, upstream is the original) - no change"
     return 0
   fi
@@ -108,14 +184,17 @@ cmd_to_fork() {
   else
     [ -n "$fork_url" ] || die "$home has no fork remote; pass --fork-url <url>"
   fi
+  plan_remote_config_remaps "$home" to-fork
   echo "re-point to fork-as-source: $home"
   echo "  target: origin=$fork_url  upstream=$(remote_url "$home" origin)"
+  show_remote_config_remaps
   git_do "$home" remote rename origin upstream
   if has_remote "$home" fork; then
     git_do "$home" remote rename fork origin
   else
     git_do "$home" remote add origin "$fork_url"
   fi
+  [ "$APPLY" = yes ] && apply_remote_config_remaps
   if [ "$APPLY" = yes ]; then
     echo "done: $home is now fork-as-source"
     echo "next (MAIN home only): run 'no-mistakes init' in $home so the gate opens PRs against the fork"
@@ -129,17 +208,21 @@ cmd_to_origin() {
   local home=$1
   require_repo "$home"
   # Idempotent: already original-as-origin.
-  if has_remote "$home" fork && ! has_remote "$home" upstream; then
+  if has_remote "$home" origin && has_remote "$home" fork && ! has_remote "$home" upstream; then
+    validate_remote_configs "$home"
     echo "already original-as-origin: $home - no change"
     return 0
   fi
   has_remote "$home" origin || die "$home has no origin remote to revert"
   has_remote "$home" upstream || die "$home has no upstream remote; nothing to revert"
   has_remote "$home" fork && die "$home already has a fork remote; unexpected state, refusing to revert"
+  plan_remote_config_remaps "$home" to-origin
   echo "revert to original-as-origin: $home"
   echo "  target: origin=$(remote_url "$home" upstream)  fork=$(remote_url "$home" origin)"
+  show_remote_config_remaps
   git_do "$home" remote rename origin fork
   git_do "$home" remote rename upstream origin
+  [ "$APPLY" = yes ] && apply_remote_config_remaps
   if [ "$APPLY" = yes ]; then
     echo "done: $home is back to original-as-origin"
     echo "next (MAIN home only): run 'no-mistakes init' in $home so the gate opens PRs against the original again"
