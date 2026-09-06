@@ -90,7 +90,7 @@ make_shallow_case() {
   done
   git clone --quiet --bare "$source" "$origin"
   remote_abs=$(cd "$origin" && pwd)
-  # This private, disposable fixture may use --depth; it never touches a shared project or lane repository.
+  # This private, disposable fixture may use --depth; it shares neither the project clone nor any lane object store.
   git clone --quiet --depth 2 "file://$remote_abs" "$project"
   git -C "$project" worktree add --quiet --detach "$pool" HEAD
 

@@ -89,6 +89,14 @@ if [ "${1:-}" = "--escalate" ]; then
       exit 1
       ;;
   esac
+  case "$VERB" in
+    needs-decision|blocked)
+      [ -n "$KEY" ] || {
+        echo "error: --escalate $VERB requires --key so concurrent decisions cannot collapse into the default key" >&2
+        exit 1
+      }
+      ;;
+  esac
   NOTE=$*
   [ -n "$NOTE" ] || { echo "error: --escalate requires a note" >&2; exit 1; }
   FM_HOME=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}

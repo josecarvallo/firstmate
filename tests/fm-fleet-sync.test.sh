@@ -93,7 +93,7 @@ build_shallow_pair() {
 
   git clone --quiet --bare "$work" "$remote"
   remote_abs=$(cd "$remote" && pwd)
-  # This private, disposable fixture may use --depth; it never touches a shared project or lane repository.
+  # This private, disposable fixture may use --depth; it shares neither the project clone nor any lane object store.
   git clone --quiet --depth 2 "file://$remote_abs" "$clone"
   printf '%s\n' "$clone"
 }

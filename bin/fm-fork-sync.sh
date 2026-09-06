@@ -100,13 +100,6 @@ for r in "$FROM" "$TO"; do
   fi
 done
 
-# Resolve the branch to feed: explicit --branch, else the fork remote's default
-# branch, else main.
-if [ -z "$BRANCH" ]; then
-  BRANCH=$(git -C "$FM_ROOT" symbolic-ref --quiet --short "refs/remotes/$TO/HEAD" 2>/dev/null | sed "s#^$TO/##" || true)
-  [ -n "$BRANCH" ] || BRANCH=main
-fi
-
 # --- fetch both sides (a fetch failure is a real blocker) ------------------
 
 for r in "$FROM" "$TO"; do
@@ -115,6 +108,20 @@ for r in "$FROM" "$TO"; do
     exit 2
   fi
 done
+
+# Resolve the branch only after refreshing both remotes. An explicit branch is
+# authoritative; otherwise the target remote's current HEAD is authoritative.
+if [ -z "$BRANCH" ]; then
+  if ! git -C "$FM_ROOT" remote set-head "$TO" --auto >/dev/null 2>&1; then
+    echo "fm-fork-sync: could not resolve $TO's current default branch; nothing changed" >&2
+    exit 2
+  fi
+  BRANCH=$(git -C "$FM_ROOT" symbolic-ref --quiet --short "refs/remotes/$TO/HEAD" 2>/dev/null | sed "s#^$TO/##" || true)
+  if [ -z "$BRANCH" ]; then
+    echo "fm-fork-sync: could not read $TO's current default branch; nothing changed" >&2
+    exit 2
+  fi
+fi
 
 from_ref="$FROM/$BRANCH"
 to_ref="$TO/$BRANCH"

@@ -45,13 +45,14 @@ new_world() {
 # Add a commit to a bare repo (which=original|fork) and echo nothing. Uses a
 # throwaway clone so the bare repo advances by a real push.
 advance() {
-  local w=$1 which=$2 msg=$3 c
+  local w=$1 which=$2 msg=$3 branch=${4:-main} c
   c="$TMP_ROOT/tmp-$which-$RANDOM"
   git clone -q "$w/$which.git" "$c" 2>/dev/null
+  git -C "$c" checkout -q "$branch"
   printf '%s\n' "$msg" >> "$c/f"
   git -C "$c" add -A
   git -C "$c" commit -qm "$msg"
-  git -C "$c" push -q origin main
+  git -C "$c" push -q origin "$branch"
   rm -rf "$c"
 }
 
@@ -140,6 +141,46 @@ test_already_current() {
   pass "already-current fork is a no-op"
 }
 
+test_refreshes_target_default_branch_after_fetch() {
+  local w out
+  w=$(new_world refreshed-default)
+  git --git-dir="$w/original.git" branch stable main
+  git --git-dir="$w/fork.git" branch stable main
+  git --git-dir="$w/original.git" symbolic-ref HEAD refs/heads/stable
+  git --git-dir="$w/fork.git" symbolic-ref HEAD refs/heads/stable
+  git -C "$w/work" fetch -q upstream
+  git -C "$w/work" fetch -q origin
+  git -C "$w/work" remote set-head origin main
+  advance "$w" original B stable
+
+  out=$(run_sync "$w" --apply)
+
+  assert_contains "$out" "origin/stable" "the refreshed target default selected stable"
+  [ "$(git --git-dir="$w/fork.git" rev-parse stable)" = \
+    "$(git --git-dir="$w/original.git" rev-parse stable)" ] \
+    || fail "fork stable did not advance to original stable"
+  [ "$(git --git-dir="$w/fork.git" rev-parse main)" != \
+    "$(git --git-dir="$w/original.git" rev-parse stable)" ] \
+    || fail "the stale cached main branch was fed instead of stable"
+  pass "fork sync refreshes the target remote default after fetching"
+}
+
+test_explicit_branch_overrides_target_default() {
+  local w out
+  w=$(new_world explicit-default)
+  git --git-dir="$w/original.git" branch stable main
+  git --git-dir="$w/fork.git" branch stable main
+  git --git-dir="$w/fork.git" symbolic-ref HEAD refs/heads/stable
+  advance "$w" original B main
+
+  out=$(run_sync "$w" --branch main --apply)
+
+  assert_contains "$out" "origin/main" "the explicit main branch was preserved"
+  [ "$(fork_main "$w")" = "$(orig_main "$w")" ] \
+    || fail "explicit --branch main did not advance fork main"
+  pass "an explicit fork-sync branch overrides the target remote default"
+}
+
 # --- fail closed on a missing remote
 test_missing_remote_fails_closed() {
   local w out rc
@@ -206,6 +247,8 @@ test_clean_ff
 test_diverged_never_discards
 test_fork_ahead_nothing_to_feed
 test_already_current
+test_refreshes_target_default_branch_after_fetch
+test_explicit_branch_overrides_target_default
 test_missing_remote_fails_closed
 test_config_remote_with_internal_whitespace_is_rejected
 test_relationship_traversal_failure_refuses_without_publishing

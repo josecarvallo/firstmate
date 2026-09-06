@@ -433,10 +433,48 @@ RESOLVE_PARENT_CHANNEL=
 # derived `<task>-decision-<key>` identity for pre-collapse rows. Answerable
 # means not closed and still carrying the captain-hold annotations tasks-axi
 # preserves even past a hold-until date.
-fm_send_hold_resolved_id() {  # <task-id> <decision-key>
-  local show id state hold_kind
+fm_send_hold_transfer_inventory() {  # <status-file> <decision-key>
+  local file=$1 key=$2 line note inventory='' held resolve open='' next was
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    was=0
+    _fm_open_set_has "$open" "$key" && was=1
+    next=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+    if [ "$was" -eq 1 ] && ! _fm_open_set_has "$next" "$key"; then
+      inventory=''
+      if [ "$(status_line_verb "$line")" = "$held" ]; then
+        note=$(status_line_note "$line")
+        case "$note" in
+          'tracked by '*) inventory=${note#'tracked by '} ;;
+        esac
+      fi
+    elif [ "$was" -eq 0 ] && _fm_open_set_has "$next" "$key"; then
+      inventory=''
+    fi
+    open=$next
+  done < "$file"
+  ! _fm_open_set_has "$open" "$key" || return 1
+  [ -n "$inventory" ] || return 1
+  printf '%s\n' "$inventory"
+}
+
+fm_send_inventory_has() {  # <comma-list> <task-id>
+  case ",$1," in
+    *",$2,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_send_hold_resolved_id() {  # <task-id> <decision-key> <status-file>
+  local show id state hold_kind inventory
   command -v tasks-axi >/dev/null 2>&1 || return 1
+  inventory=$(fm_send_hold_transfer_inventory "$3" "$2") || return 1
   for id in "$2" "$1-decision-$2"; do
+    if ! fm_send_inventory_has "$inventory" "$id" \
+      && { [ "$id" = "$2" ] || ! fm_send_inventory_has "$inventory" "$2"; }; then
+      continue
+    fi
     show=$( (cd "$FM_HOME" && tasks-axi show "$id" --full) 2>/dev/null ) || continue
     state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
     hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)
@@ -485,10 +523,12 @@ if [ -n "$RESOLVE_KEYS" ]; then
   fi
   for k in $RESOLVE_KEYS; do
     resolve_key_owned=0
+    resolve_key_live=0
     case "$resolve_open_set" in
       "$k"$'\t'*|*$'\n'"$k"$'\t'*)
         RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
         resolve_key_owned=1
+        resolve_key_live=1
         ;;
     esac
     # The same key can live in more than one copy: the worker raised it locally
@@ -497,6 +537,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
     # than stopping at the first.
     case "$resolve_parent_open_set" in
       "$k"$'\t'*|*$'\n'"$k"$'\t'*)
+        resolve_key_live=1
         # A reserved namespace has exactly one owning library, which is the only
         # thing that may open or close it. Leave that copy entirely alone rather
         # than propagating a foreign close into it.
@@ -506,12 +547,17 @@ if [ -n "$RESOLVE_KEYS" ]; then
         fi
         ;;
     esac
-    if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
+    if [ "$resolve_key_live" -eq 1 ]; then
+      [ "$resolve_key_owned" -eq 1 ] && continue
+      echo "error: --resolve-key '$k': the key is live only in a reserved parent-ledger namespace that this sender does not own; nothing was sent." >&2
+      exit 1
+    fi
+    if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k" "$RESOLVE_STATUS_FILE"); then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       resolve_key_owned=1
     fi
     [ "$resolve_key_owned" -eq 1 ] && continue
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE${RESOLVE_PARENT_CHANNEL:+ or $RESOLVE_PARENT_CHANNEL}, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE${RESOLVE_PARENT_CHANNEL:+ or $RESOLVE_PARENT_CHANNEL}, and no verified captain-held transfer to task '$k' or '$RESOLVE_TASK_ID-decision-$k' (already closed, unrelated, or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
 fi

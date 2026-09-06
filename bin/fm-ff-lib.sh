@@ -55,6 +55,16 @@ default_branch() {
   return 1
 }
 
+remote_default_branch() {
+  local dir=$1 remote=$2 ref
+  git -C "$dir" remote set-head "$remote" --auto >/dev/null 2>&1 || return 1
+  ref=$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
+  case "$ref" in
+    "$remote/"?*) printf '%s\n' "${ref#"$remote/"}" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD
 # sync target every secondmate follows. Reads the default branch *ref* rather than
 # HEAD, so even a primary stranded on a feature branch (the worktree tangle of
@@ -328,10 +338,6 @@ ff_target() {
   fi
 
   local default base cur instr local_rev base_rev before after out
-  default=$(default_branch "$dir") || {
-    echo "$label: skipped: cannot determine default branch"
-    return 0
-  }
 
   # Resolve the fast-forward base from base_mode (see header). The "origin"
   # sentinel means "fetch mode": advance to <update-remote>/<default>, where the
@@ -348,8 +354,16 @@ ff_target() {
       echo "$label: skipped: fetch failed"
       return 0
     fi
+    default=$(remote_default_branch "$dir" "$remote") || {
+      echo "$label: skipped: cannot determine $remote default branch"
+      return 0
+    }
     base="$remote/$default"
   else
+    default=$(default_branch "$dir") || {
+      echo "$label: skipped: cannot determine default branch"
+      return 0
+    }
     base="$base_mode"
   fi
 

@@ -221,7 +221,7 @@ test_full_cycle_close_reaches_parent_channel() {
   pass "parent channel: a close aimed at the worker also closes the key the mate opened upstream"
 }
 
-test_answer_enumerates_every_live_ledger() {
+test_answer_uses_live_ledgers_before_verified_hold_transfer() {
   local dir fb log parent mate pair tasks rc out
   dir="$TMP_ROOT/all-ledgers"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"; tasks="$dir/tasks"
@@ -230,7 +230,7 @@ test_answer_enumerates_every_live_ledger() {
   parent=${pair% *}; mate=${pair#* }
 
   fm_write_meta "$mate/state/w7.meta" "window=sess:fm-w7" "kind=ship"
-  printf 'captain-held [key=all-copies]: tracked by all-copies\n' > "$mate/state/w7.status"
+  printf 'needs-decision [key=all-copies]: choose a or b\n' > "$mate/state/w7.status"
   printf 'needs-decision [key=all-copies]: choose a or b\n' > "$parent/state/ledger-mate.status"
   printf 'queued\n' > "$tasks/all-copies.state"
   printf 'captain\n' > "$tasks/all-copies.hold"
@@ -239,23 +239,40 @@ test_answer_enumerates_every_live_ledger() {
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
     FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_FAKE_TASKS_STATE="$tasks" \
     "$SEND" w7 --resolve-key all-copies "choose a" >/dev/null 2>&1; rc=$?
-  expect_code 0 "$rc" "one answer should close every ledger that claims the key"
+  expect_code 0 "$rc" "one answer should close every live ledger that claims the key"
   out=$(drain_out "$parent")
   if printf '%s' "$out" | grep -F '[key=all-copies]' >/dev/null; then
     fail "the parent-channel copy remained open after the shared answer: $out"
   fi
-  [ "$(cat "$tasks/all-copies.state")" = 'done' ] \
-    || fail "the local captain-held copy was not closed by the shared answer"
+  [ "$(cat "$tasks/all-copies.state")" = 'queued' ] \
+    || fail "an unrelated captain-held task with a colliding id was closed"
 
   fm_write_meta "$mate/state/w8.meta" "window=sess:fm-w8" "kind=ship"
-  printf 'working: no decision here\n' > "$mate/state/w8.status"
+  printf 'needs-decision [key=transferred-call]: choose a or b\n' > "$mate/state/w8.status"
+  printf 'captain-held [key=transferred-call]: tracked by transferred-call\n' >> "$mate/state/w8.status"
+  printf 'queued\n' > "$tasks/transferred-call.state"
+  printf 'captain\n' > "$tasks/transferred-call.hold"
   : > "$log"
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
     FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_FAKE_TASKS_STATE="$tasks" \
-    "$SEND" w8 --resolve-key nowhere "choose a" >/dev/null 2>&1; rc=$?
-  [ "$rc" -ne 0 ] || fail "a key claimed by no ledger was still sent"
-  [ ! -s "$log" ] || fail "the no-ledger refusal still typed text: $(cat "$log")"
-  pass "parent channel: one answer closes every claiming ledger and none means refusal"
+    "$SEND" w8 --resolve-key transferred-call "choose a" >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "a verified captain-held transfer should be answerable"
+  [ "$(cat "$tasks/transferred-call.state")" = 'done' ] \
+    || fail "the verified captain-held transfer was not closed"
+
+  fm_write_meta "$mate/state/w9.meta" "window=sess:fm-w9" "kind=ship"
+  printf 'working: no decision here\n' > "$mate/state/w9.status"
+  printf 'queued\n' > "$tasks/untransferred-call.state"
+  printf 'captain\n' > "$tasks/untransferred-call.hold"
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_FAKE_TASKS_STATE="$tasks" \
+    "$SEND" w9 --resolve-key untransferred-call "choose a" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "an untransferred captain-held task was still sent"
+  [ ! -s "$log" ] || fail "the unverified-hold refusal still typed text: $(cat "$log")"
+  [ "$(cat "$tasks/untransferred-call.state")" = 'queued' ] \
+    || fail "the unverified captain-held task was closed"
+  pass "parent channel: live ledgers take precedence and holds require verified transfer"
 }
 
 # Reopening a key is a new decision lifetime even when its answer repeats, while
@@ -318,24 +335,18 @@ test_reopened_key_closes_and_close_replay_is_idempotent() {
   [ "$n" = 2 ] \
     || fail "an already-settled close replay appended a third line: $(cat "$channel")"
 
-  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
-    "$REPORT" --escalate needs-decision "default route" >/dev/null 2>&1 \
-    || fail "the first default-key decision could not open"
-  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
-    "$REPORT" --escalate resolved "same default answer" >/dev/null 2>&1 \
-    || fail "the first default-key decision could not close"
-  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
-    "$REPORT" --escalate needs-decision "default route" >/dev/null 2>&1 \
-    || fail "the identical default-key decision did not reopen"
-  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
-    "$REPORT" --escalate resolved "same default answer" >/dev/null 2>&1 \
-    || fail "the reopened default-key decision could not close"
-  n=$(grep -c '^resolved: same default answer$' "$channel" || true)
-  [ "$n" = 2 ] || fail "two default-key lifetimes produced $n closes"
-  out=$(drain_out "$parent")
-  if printf '%s' "$out" | grep -F '[key=default]' >/dev/null; then
-    fail "the reopened default-key decision stayed open: $out"
+  if env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+      "$REPORT" --escalate needs-decision "default route" >/dev/null 2>&1; then
+    fail "an unkeyed decision opening was accepted"
   fi
+  if env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+      "$REPORT" --escalate blocked "default blocker" >/dev/null 2>&1; then
+    fail "an unkeyed blocker opening was accepted"
+  fi
+  assert_not_contains "$(cat "$channel")" "default route" \
+    "a refused unkeyed decision still reached the channel"
+  assert_not_contains "$(cat "$channel")" "default blocker" \
+    "a refused unkeyed blocker still reached the channel"
   pass "parent channel: write categories fail closed and retain distinct live semantics"
 }
 
@@ -700,7 +711,7 @@ test_reserved_namespace_is_not_propagated() {
 }
 
 test_full_cycle_close_reaches_parent_channel
-test_answer_enumerates_every_live_ledger
+test_answer_uses_live_ledgers_before_verified_hold_transfer
 test_reopened_key_closes_and_close_replay_is_idempotent
 test_mate_originated_escalation_reaches_parent
 test_remote_route_uses_mirrored_channel

@@ -108,16 +108,19 @@ add_fork() {
 
 # Advance the fork by one clean commit (a descendant of origin's tip), changing
 # the instruction surface so an advance implies a reread/nudge.
-bump_fork() {
-  local w=$1
+bump_fork_branch() {
+  local w=$1 branch=$2
   rm -rf "$w/forkseed"
   git clone -q "$w/fork.git" "$w/forkseed" 2>/dev/null
+  git -C "$w/forkseed" checkout -q "$branch"
   printf 'v-fork\n' > "$w/forkseed/AGENTS.md"
   printf 'echo fork\n' > "$w/forkseed/bin/tool.sh"
   git -C "$w/forkseed" add -A
   git -C "$w/forkseed" commit -qm bump-fork
-  git -C "$w/forkseed" push -q origin main   # this clone's origin == fork.git
+  git -C "$w/forkseed" push -q origin "$branch"
 }
+
+bump_fork() { bump_fork_branch "$1" main; }
 
 # Point a home's update source at the `fork` remote via its own gitignored config.
 point_at_fork() {
@@ -357,6 +360,29 @@ test_config_remote_redirects_to_fork() {
   pass "T12 config/update-remote fetches the fork, not origin"
 }
 
+test_config_remote_refreshes_its_own_default_branch() {
+  local w out
+  w=$(new_world t12-remote-head)
+  add_fork "$w"
+  git --git-dir="$w/fork.git" branch stable main
+  git --git-dir="$w/fork.git" symbolic-ref HEAD refs/heads/stable
+  git -C "$w/main" fetch -q fork
+  git -C "$w/main" remote set-head fork main
+  git -C "$w/main" checkout -q -b stable fork/stable
+  bump_fork_branch "$w" stable
+  point_at_fork "$w/main"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " \
+    "the configured remote's refreshed default branch fast-forwarded"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse fork/stable)" ] \
+    || fail "firstmate did not land the configured remote's stable tip"
+  [ "$(git -C "$w/main" symbolic-ref --short refs/remotes/fork/HEAD)" = fork/stable ] \
+    || fail "the configured remote's cached HEAD was not refreshed"
+  pass "T12 configured update remote resolves its own current default branch"
+}
+
 # --- T13: configured remote missing is skipped, nothing forced -------------
 test_config_remote_missing_skipped() {
   local w out before
@@ -414,6 +440,7 @@ test_config_remote_with_internal_whitespace_falls_back_to_origin() {
 
 test_updates_main_and_secondmate
 test_config_remote_redirects_to_fork
+test_config_remote_refreshes_its_own_default_branch
 test_config_remote_missing_skipped
 test_config_remote_preserves_guards
 test_config_remote_with_internal_whitespace_falls_back_to_origin

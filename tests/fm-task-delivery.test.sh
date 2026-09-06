@@ -139,7 +139,7 @@ EOF
   git clone --quiet --bare "$source" "$origin"
   remote_abs=$(cd "$origin" && pwd -P)
   rmdir "$proj"
-  # This private, disposable fixture may use --depth; it never touches a shared project or lane repository.
+  # This private, disposable fixture may use --depth; it shares neither the project clone nor any lane object store.
   git clone --quiet --depth 1 "file://$remote_abs" "$proj"
   [ "$(git -C "$proj" rev-parse --is-shallow-repository)" = true ] \
     || fail "delivery mismatch fixture is not shallow"
